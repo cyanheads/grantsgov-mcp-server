@@ -99,7 +99,7 @@ const optionalList = <T extends z.ZodType>(item: T, max: number) =>
 
 ### `grantsgov_search_opportunities`
 
-**Description (draft):** `Search federal funding opportunities on Grants.gov by keyword, agency, applicant eligibility, funding category, funding instrument, assistance listing, or opportunity number. Returns forecasted and posted opportunities unless statuses says otherwise, each row led by its close date and days remaining, plus facet counts for narrowing. Keyword terms are all required; join alternatives with OR. Rows carry no award amounts or eligibility detail; read those with grantsgov_get_opportunity. Filter codes come from grantsgov_list_reference.`
+**Description (draft):** `Search federal funding opportunities on Grants.gov by keyword, agency, applicant eligibility, funding category, funding instrument, assistance listing, opportunity number, posting window (posted_within_days), or closing window (closing_within_days). Returns forecasted and posted opportunities unless statuses says otherwise, each row led by its close date and days remaining, plus facet counts for narrowing. Keyword terms are all required; join alternatives with OR. Rows carry no award amounts or eligibility detail; read those with grantsgov_get_opportunity. Filter codes come from grantsgov_list_reference.`
 
 #### Params
 
@@ -116,7 +116,7 @@ const optionalList = <T extends z.ZodType>(item: T, max: number) =>
 | `opportunity_number` | `optionalText(z.string().max(100).regex(/^[^"]+$/))` | `oppNum`, **always wrapped in double quotes** | The upstream parses `oppNum` as a query, not a literal: `PAR-25-14*` is a wildcard (8 hits), and a number containing a space matches nothing unquoted (`PAS-TUNIS- APS FY2026` → 0, quoted → 1). Quoting makes it literal (`"PAR-25-14*"` → 0) and is harmless for plain numbers. `"` is rejected by the schema; no real number contains one. Case-sensitive upstream (`hrsa-27-005` → 0): sent as given, and on zero exact matches with lowercase letters present, retried once uppercased. Rows are post-filtered to exact equality (after trim, case-insensitive), because `oppNum: "1"` also returns an unrelated `21561-9-F017A`, quoted or not. **Paging in this mode is local:** fetch `rows: 100` at offset 0 with the caller's other filters, filter, then slice by `offset`/`limit`; `totalCount` is the filtered count, never the upstream `hitCount`. |
 | `posted_within_days` | `z.preprocess(blankOrDigits, z.number().int().min(1).max(3650).optional())` | `dateRange` (string of the integer) | Posting date within the last N days. Upstream returns 0 for `0`, negatives, and non-numerics, hence `min(1)`. **Only valid when every status is `forecasted` or `posted`**. With `closed`/`archived`, the upstream drops the status filter and returns forecasted+posted rows. → `filter_conflict`. |
 | `closing_within_days` | `z.preprocess(blankOrDigits, z.number().int().min(0).max(365).optional())` | `oppStatuses: 'posted'`, `sortBy: 'closeDate\|asc'`, then a server-side window cut | `0` = closing today (ET). Forces `statuses = ['posted']` and `sort = close_date_asc`; an explicit conflicting `statuses` or `sort` → `filter_conflict`. There is no upstream close-date filter. See [Closing-window scan](#closing-window-scan). |
-| `sort` | `z.enum([...]).optional()` | `sortBy` | `relevance` (omit `sortBy`), `open_date_desc`/`open_date_asc` (`openDate\|desc/asc`), `close_date_asc`/`close_date_desc` (`closeDate\|…`), `opportunity_number_asc`/`_desc` (`oppNum\|…`), `agency_asc`/`_desc` (`agency\|…`). Default: `relevance` when `keyword` is set, else `open_date_desc`. Echoed. Any other `sortBy` (`relevance`, `title\|asc`, `oppTitle\|asc`, `openDate` with no direction) returns 0 upstream, so the enum is the allowlist. |
+| `sort` | `optionalText(z.enum([...]))` | `sortBy` | `relevance` (omit `sortBy`), `open_date_desc`/`open_date_asc` (`openDate\|desc/asc`), `close_date_asc`/`close_date_desc` (`closeDate\|…`), `opportunity_number_asc`/`_desc` (`oppNum\|…`), `agency_asc`/`_desc` (`agency\|…`). Default: `relevance` when `keyword` is set, else `open_date_desc`. Echoed. Any other `sortBy` (`relevance`, `title\|asc`, `oppTitle\|asc`, `openDate` with no direction) returns 0 upstream, so the enum is the allowlist. |
 | `limit` | `z.number().int().min(1).max(100).default(25)` | `rows` | The upstream has no rows cap (10,000 returned in one call); 100 is a context cap. |
 | `offset` | `z.number().int().min(0).max(100000).default(0)` | `startRecordNum` | 0-based. Past the end, upstream returns 0 rows with the true `hitCount`, which gets a notice. |
 | `include_facets` | `z.boolean().default(true)` | none (`search2` always returns facets) | `false` drops the ~4 KB facet block when paging. |
@@ -160,7 +160,9 @@ Probed on posted opportunities with `sortBy: closeDate|asc`: close dates are mon
 3. Stop at the first row whose close date is blank or later than `cutoff`, when a page comes back short, or after 2,000 rows scanned (a hard ceiling; the whole posted universe is 940). Hitting the ceiling sets a notice. The first row past the window is kept as `nextCloseAfterWindow` for the empty-window notice.
 4. The window is `todayET ≤ close_date ≤ cutoff`. A posted row dated before today (a status flip the upstream has not run yet) is skipped, not counted. `window_total` = rows inside the window. The returned page is `window.slice(offset, offset + limit)`.
 
-With `opportunity_number` also set, the scan sends the quoted `oppNum` and applies the exact-equality filter to the window before slicing. One call covers the typical case (242 posted opportunities closed within 30 days at the idea-stage probe). Facet counts in this mode describe the whole posted set matching the other filters, not the window. The notice says so when facets are included.
+One call covers the typical case (242 posted opportunities closed within 30 days at the idea-stage probe). Facet counts in this mode describe the whole posted set matching the other filters, not the window. The notice says so when facets are included.
+
+With `opportunity_number` also set, there is no paged scan. A quoted number narrows the posted set to a handful of rows, so the tool reads one number-mode page (`oppNum` quoted, `oppStatuses: 'posted'`, `sortBy: 'closeDate|asc'`, `rows: 100`), keeps exact matches only, and applies the same window cut to them. The window, the next close after it, and the posted count used by the empty-window notice all exclude non-equal upstream hits. The uppercase retry fires only when the number has no exact posted match at all, so a lowercase number whose only match closes after the window keeps its own result.
 
 #### Output
 
@@ -172,8 +174,8 @@ output: z.object({
     title: z.string().describe('Opportunity title (HTML entities decoded).'),
     status: z.enum(['forecasted','posted','closed','archived']).describe('Lifecycle status.'),
     doc_type: z.enum(['synopsis','forecast']).describe('Whether the record is a posted synopsis or a forecast.'),
-    agency_code: z.string().describe('Owning agency code, e.g. HHS-HRSA.'),
-    agency_name: z.string().describe('Owning agency name.'),
+    agency_code: z.string().optional().describe('Owning agency code, e.g. HHS-HRSA. Omitted when the record lists none.'),
+    agency_name: z.string().optional().describe('Owning agency name. Omitted when the record lists none.'),
     open_date: z.string().optional().describe('Posting date, YYYY-MM-DD. Omitted when not listed.'),
     close_date: z.string().optional().describe('Close date as listed, YYYY-MM-DD. Omitted when none is listed.'),
     close_date_kind: z.enum(['fixed','none_listed','placeholder']).describe('fixed = a real deadline; none_listed = no close date in search (rolling or open-ended, and every forecast: its estimated close date is on the grantsgov_get_opportunity record); placeholder = a far-future stand-in date the agency uses for "accepted anytime".'),
@@ -193,6 +195,7 @@ output: z.object({
 - `facets.statuses` counts all four statuses for the other filters, regardless of the `statuses` filter (upstream `oppStatusOptions` behavior). That is what makes the "add closed/archived" notice possible.
 - `facets.agencies` is the top-level list. `sub_agencies` is present only when an `agencies` filter is set, and lists the `subAgencyOptions` of the top-level agencies in the result.
 - Labels are trimmed (20 of 940 agency names carry a trailing space).
+- In opportunity-number mode, facet counts are the upstream's for the quoted number, so they can include the non-equal hits the exact filter drops from the rows.
 
 #### Enrichment
 
@@ -210,22 +213,26 @@ enrichment: {
 enrichmentTrailer: { applied_filters: { render: renderAppliedFilters } },
 ```
 
-**Required fields are written unconditionally before the handler branches.** The first enrichment call runs straight after input normalization, ahead of the upstream call and any mode branch:
+**Required fields are written unconditionally before the handler branches.** The first enrichment call is the handler's first statement. `applied_filters` is written once validation and agency encoding finish (they need the reference snapshot and can only throw), ahead of any mode branch:
 
 ```ts
-ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: input.limit, applied_filters: applied });
+ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: input.limit });
+// …validation, snapshot lookup, agency encoding…
+ctx.enrich({ applied_filters: applied, ...(keyword && { effective_keyword: keyword.compiled }) });
 // …search, opportunity-number, or closing-window branch…
+const more = rows.length > 0 && input.offset + rows.length < total;
+if (more) fragments.push(`More results: call again with offset ${input.offset + rows.length}.`);
+const notice = fragments.join(' ') || undefined; // zero-hit, window, scan-ceiling, facet-scope, more-results
 ctx.enrich({ totalCount: total, shown: rows.length });
-const notice = composeNotice(/* zero-hit, window, scan-ceiling, facet-scope fragments */);
-if (input.offset + rows.length < total) {
+if (more) {
   ctx.enrich({ next_offset: input.offset + rows.length });
-  ctx.enrich.truncated({ shown: rows.length, cap: input.limit, guidance: notice ?? `More results: call again with offset ${input.offset + rows.length}.` });
+  ctx.enrich.truncated({ shown: rows.length, cap: input.limit, guidance: notice });
 } else if (notice) {
   ctx.enrich.notice(notice);
 }
 ```
 
-A write from one branch only would fail the framework's `output.extend(enrichment)` parse on every other page. `ctx.enrich.truncated()` always writes `notice` (its `guidance`, or a generated default) and the last write wins, so every notice fragment is composed into one string first and passed through a single final write, never written separately before it.
+A write from one branch only would fail the framework's `output.extend(enrichment)` parse on every other page. `ctx.enrich.truncated()` always writes `notice` (its `guidance`, or a generated default) and the last write wins, so every notice fragment, the "More results" pointer included, is composed into one string first and passed through a single final write, never written separately before it.
 
 #### Outcome states
 
@@ -235,15 +242,16 @@ A write from one branch only would fail the framework's `output.extend(enrichmen
 | Last page | `offset + shown == totalCount` | `truncated: false`, no `next_offset`. |
 | Offset past end | `offset ≥ totalCount > 0` | Empty rows + notice: `Offset {offset} is past the end of {totalCount} results. Call again with offset 0, or a multiple of limit below {totalCount}.` |
 | Zero hits | `totalCount == 0` | Success, empty rows, composed notice (below). |
-| Window empty, posted matches exist | closing mode, `window_total == 0`, posted hits > 0 | When `nextCloseAfterWindow` is a `fixed` date with `d ≤ 365`: `No posted opportunity matching these filters closes within {N} days; the next one closes {date} ({d} days). Raise closing_within_days to at least {d}.` Otherwise (blank, placeholder, or more than 365 days out): `No posted opportunity matching these filters has a fixed deadline within {N} days; all {postedTotal} posted matches close later or list no fixed date. Call grantsgov_search_opportunities without closing_within_days and with sort close_date_asc to see them.` |
+| Window empty, posted matches exist | closing mode, `window_total == 0`, posted hits > 0 (exact matches only in opportunity-number mode) | When `nextCloseAfterWindow` is a `fixed` date with `d ≤ 365`: `No posted opportunity matching these filters closes within {N} days; the next one closes {date} ({d} days). Raise closing_within_days to at least {d}.` When it is blank, a placeholder, or more than 365 days out: `No posted opportunity matching these filters has a fixed deadline within {N} days; all {postedTotal} posted matches close later or list no fixed date. Call grantsgov_search_opportunities without closing_within_days and with sort close_date_asc to see them.` When no row past the window was reached (every posted match is dated before today, awaiting the upstream status flip): `No posted opportunity matching these filters closes within {N} days; all {postedTotal} posted matches have close dates before today that Grants.gov has not yet marked closed.` plus the same pointer. `within {N} days` reads `today` for `N = 0`, days are pluralized, and a count of 1 reads `the 1 posted match` with singular verbs. |
 | Scan ceiling hit | 2,000 rows scanned without leaving the window | Rows as scanned + notice: `The closing window holds more than 2,000 opportunities; results cover the first 2,000 by close date. Add filters to narrow.` |
 | Invalid input | see errors | Typed error. |
 
-**Zero-hit notice composition.** Fragments append in this order when their condition holds. The last fragment is always present:
+**Zero-hit notice composition.** Fragments append in this order when their condition holds. The first and last fragments are always present:
 
 | Condition | Fragment |
 |:----------|:---------|
-| `statuses` defaulted and `facets.statuses` shows closed/archived matches | `{c} closed and {a} archived opportunities match; add "closed" and/or "archived" to statuses to include them.` |
+| always | `No opportunities matched these filters.` |
+| `statuses` defaulted, `opportunity_number` not set, and `facets.statuses` shows closed/archived matches | `{c} closed and {a} archived opportunities match; add "closed" and/or "archived" to statuses to include them.` (Skipped in opportunity-number mode: those counts include non-equal hits, and the `opportunity_number` fragment names the right call.) |
 | `keyword` compiled to ≥2 ANDed operands | `All keyword terms were required ({effective_keyword}); join alternatives with OR, or drop a term.` |
 | `eligibilities` set and `include_unrestricted: false` | `Set include_unrestricted to true to add opportunities open to any applicant type.` |
 | `posted_within_days` set | `Raise posted_within_days or remove it; it limits results to opportunities posted in the last {N} days.` |
@@ -260,7 +268,8 @@ A write from one branch only would fail the framework's `output.extend(enrichmen
 | `unknown_eligibility` | `ValidationError` | An `eligibilities` code is not in the applicant-type list. | `Call grantsgov_list_reference with topic eligibilities for the valid two-digit applicant-type codes.` |
 | `unknown_funding_category` | `ValidationError` | A `funding_categories` code is not in the category list. | `Call grantsgov_list_reference with topic funding_categories for the valid category codes.` |
 | `filter_conflict` | `ValidationError` | `posted_within_days` with `closed`/`archived` in statuses; `closing_within_days` with statuses other than `['posted']` or a sort other than `close_date_asc`. | `Remove the conflicting statuses or sort value and call grantsgov_search_opportunities again.` (Dynamic hint names the exact field to drop.) |
-| `upstream_unavailable` | `ServiceUnavailable`, `retryable: true`, `thrownBy: 'service'` | Grants.gov returned 5xx, an HTML/non-JSON body, a non-zero `errorcode`, or the "backend … is not available" in-band message after retries. | `Grants.gov is not responding; wait a minute and call grantsgov_search_opportunities again.` |
+| `upstream_unavailable` | `ServiceUnavailable`, `retryable: true`, `thrownBy: 'service'` | Grants.gov did not respond (network error or per-attempt timeout), or returned 5xx (504 included), an HTML/non-JSON body, a non-zero `errorcode`, or the "backend … is not available" in-band message, after retries. | `Grants.gov is not responding; wait a minute and call grantsgov_search_opportunities again.` |
+| `rate_limited` | `RateLimited`, `retryable: true`, `thrownBy: 'service'` | HTTP 429 through every retry, or a `Retry-After` longer than the retry budget. `data.retryAfter` carries the upstream value. | `Grants.gov is rate limiting requests; wait the retryAfter interval (or a minute) and call grantsgov_search_opportunities again.` |
 | `upstream_route_unavailable` | `ServiceUnavailable`, `retryable: false`, `thrownBy: 'service'` | HTTP 403 `Missing Authentication Token`: the route no longer exists at the gateway. | `The Grants.gov search API route is not answering; the legacy API may have been retired, so report this to the server maintainer.` |
 
 Dynamic hints (`ctx.fail(reason, msg, { recovery: { hint } })`) interpolate the offending value where it helps. For example, `unknown_agency` names the rejected code, and `filter_conflict` names the field to drop.
@@ -291,7 +300,7 @@ The two lists are separate because digit-only opportunity numbers exist (`"1"` i
 | Malformed JSON body | 502 | `{"message":"Internal server error"}` | Server bug by construction. Classified `upstream_unavailable` because a genuine gateway 502 looks identical. |
 | Wrong method or path | 403 | `{"message":"Missing Authentication Token"}` | `upstream_route_unavailable` |
 
-The fetch runs at a plain-fetch boundary with a per-method accept-list, not a helper that throws on every non-2xx. For `fetchOpportunity`, the accepted statuses are `200` (parse the body and classify it as found / not_found / backend-unavailable) and `404` (`not_found`). Every other status goes through `httpErrorFromResponse` (429 → `RateLimited`, 5xx → `ServiceUnavailable`), with 403 mapped to `upstream_route_unavailable` first. A not-found is a result, never thrown.
+The fetch runs at a plain-fetch boundary with a per-method accept-list, not a helper that throws on every non-2xx. For `fetchOpportunity`, the accepted statuses are `200` (parse the body and classify it as found / not_found / backend-unavailable) and `404` (`not_found`). Every other status goes through `httpErrorFromResponse` (429 → `RateLimited`, every 5xx including 504 → `ServiceUnavailable`), with 403 mapped to `upstream_route_unavailable` first. A not-found is a result, never thrown.
 
 #### Output
 
@@ -303,7 +312,7 @@ output: z.object({
     input_kind: z.enum(['opportunity_id','opportunity_number']).describe('Which list it came from.'),
     outcome: z.enum(['not_found','ambiguous']).describe('not_found = no record; ambiguous = the number matches more than one opportunity.'),
     candidates: z.array(z.object({
-      opportunity_id, opportunity_number, title, agency_code, status, open_date?,
+      opportunity_id, opportunity_number, title, agency_code?, agency_name?, status, open_date?, close_date?,
     })).optional().describe('For ambiguous numbers: every match, to re-request by id.'),
     guidance: z.string().describe('The next call to make.'),
   })).describe('Inputs that did not resolve to exactly one record. Empty when all resolved.'),
@@ -322,7 +331,7 @@ Source paths are relative to `fetchOpportunity`'s `data`. **`{block}` is `synops
 | `status` | enum | `ost` lowercased | `POSTED` → `posted`, etc. |
 | `doc_type` | enum | `docType` | `synopsis` \| `forecast` |
 | `category_code` / `category_label` | string? | `opportunityCategory.category` / `.description` | D Discretionary, M Mandatory, C Continuation, E Earmark, O Other. |
-| `agency_code` / `agency_name` | string | `agencyDetails.agencyCode` / `.agencyName` (root) | Fallback `owningAgencyCode`. |
+| `agency_code` / `agency_name` | string? | `agencyDetails.agencyCode` / `.agencyName` (root) | Code falls back to `owningAgencyCode`. Absent when the record lists none. |
 | `top_agency_code` / `top_agency_name` | string? | `topAgencyDetails.agencyCode` / `.agencyName` (root) | |
 | `grants_gov_url` | string | built | `https://www.grants.gov/search-results-detail/{id}` |
 | `close_date` | string? | `synopsis.responseDateStr` or `forecast.estApplicationResponseDateStr` | `YYYY-MM-DD` from the `…Str` field (`2026-10-19-00-00-00`). The midnight time is an artifact and is dropped. |
@@ -345,15 +354,15 @@ Source paths are relative to `fetchOpportunity`'s `data`. **`{block}` is `synops
 | `eligibility_narrative` | string? | `{block}.applicantEligibilityDesc` | Text-normalized, capped at 6,000 chars (`eligibility_narrative_truncated`). Absent on some records (HRSA-27-005). Often plain text with literal `\n` lists (NSF 21-595) and bare entities (`&ldquo;` on DOD 356612). When absent, `format()` says `No additional eligibility text listed; see the attachments.` |
 | `funding_instruments` | `{code,label}[]` | `{block}.fundingInstruments[].id` / `.description` | |
 | `funding_categories` | `{code,label}[]` | `{block}.fundingActivityCategories[].id` / `.description` | |
-| `funding_category_explanation` | string? | `{block}.fundingActivityCategoryDesc` | The text the `O` ("Other … see text field") category label points to. Text-normalized, capped at 2,000 chars. Absent on most records (present on DOD 356612). |
+| `funding_category_explanation` | string? | `{block}.fundingActivityCategoryDesc` | The text the `O` ("Other … see text field") category label points to. Text-normalized, capped at 2,000 chars (`funding_category_explanation_truncated`). Absent on most records (present on DOD 356612). |
 | `assistance_listings` | `{number, program_title?}[]` | `cfdas[].cfdaNumber` / `.programTitle` (root) | |
 | `description` | string? | `synopsis.synopsisDesc` / `forecast.forecastDesc` | Text-normalized, capped at 12,000 chars (`description_truncated`). Probed max 10,345 chars (NSF 21-595). HTML on most agencies, plain text with literal newlines on DOS. |
 | `agency_contact` | object? | `{block}.agencyContactName`, `.agencyContactEmail`, `.agencyContactPhone`, `.agencyContactDesc` (synopsis only), `.agencyContactEmailDesc` | `{ name?, email?, phone?, details? }`. Published applicant-facing contact. Copied, never invented. `name` can hold a newline (`"samuel D Jensen\nGrantor"`), so it is an inline slot under [Untrusted text handling](#untrusted-text-handling). |
-| `additional_info_url` / `additional_info_label` | string? | `synopsis.fundingDescLinkUrl` / `synopsis.fundingDescLinkDesc` | |
+| `additional_info_url` / `additional_info_label` | string? | `{block}.fundingDescLinkUrl` / `{block}.fundingDescLinkDesc` | |
 | `attachments` | array | `synopsisAttachmentFolders[]` (root) → `.synopsisAttachments[]` | `{ attachment_id: id, folder_type: folder.folderType, file_name: fileName, description?: fileDescription, mime_type: mimeType, size_in_bytes: fileLobSize, download_url }`. `download_url` = `https://apply07.grants.gov/grantsws/rest/opportunity/att/download/{id}` (keyless, confirmed 200 `application/pdf` with a `Content-Disposition` filename). Capped at 30, with `attachment_count` holding the full count. |
 | `application_packages` | array | `opportunityPkgs[]` (root) | `{ package_id: packageId (e.g. PKG00294168), competition_id?: competitionId, competition_title?: competitionTitle, opening_date?: openingDate, closing_date?: closingDate, electronic_required?: electronicRequired }` (dates already `YYYY-MM-DD`; `electronicRequired` `"Y"`/`"N"` → boolean). Capped at 10 (`application_package_count`). The required-forms list is not in the API. |
 | `closed_package_count` | int | `closedOpportunityPkgs.length` (root) | Count only (DOD 356612 carries 25). |
-| `related_opportunities` | array | `relatedOpps[]` (root) | `{ opportunity_id: opportunityId, opportunity_number: opportunityNum, title: opportunityTitle, agency_code: agencyCode, posted_date?: postedDate, close_date?: closeDate, note?: comments }`. Dates arrive as `"Mar 20, 2015"` (no time) and are parsed to `YYYY-MM-DD`. Capped at 10. |
+| `related_opportunities` | array | `relatedOpps[]` (root) | `{ opportunity_id: opportunityId, opportunity_number: opportunityNum, title: opportunityTitle, agency_code: agencyCode, posted_date?: postedDate, close_date?: closeDate, note?: comments }`. Dates arrive as `"Mar 20, 2015"` (no time) and are parsed to `YYYY-MM-DD`. Capped at 10, with `related_opportunity_count` holding the full count. |
 
 `synopsisDocumentURLs` was empty on every sampled record (12 records across 8 agencies). Its item shape is unverified, so v1 does not surface it; see [Known Limitations](#known-limitations).
 
@@ -375,7 +384,7 @@ This block has no required field, so nothing needs to be written unconditionally
 | Partial | `opportunities` + `unresolved` + `notice`. The framework's partial-success telemetry keys on a `failed` array. This tool's misses are results, not failures, so the field is named `unresolved` on purpose. |
 | None resolved | `opportunities: []`, `unresolved` filled. **Not thrown.** |
 | Number ambiguous | `outcome: 'ambiguous'` with `candidates` (no record fetched for it). Guidance: `Opportunity number "{n}" matches {k} opportunities; call grantsgov_get_opportunity with opportunity_ids set to the one you want.` |
-| Number not found | Guidance: `No opportunity numbered "{n}" in any status. Check the exact spelling and punctuation, or call grantsgov_search_opportunities with keyword "\"{n}\"" (quoted) and statuses all four to find it by full text.` |
+| Number not found | Guidance: `No opportunity numbered "{n}" in any status. Check the exact spelling and punctuation, or find it by full text: call grantsgov_search_opportunities with keyword "{n}", double quotes included, and statuses forecasted, posted, closed, and archived.` |
 | Id not found | Guidance: `No opportunity with id {id}. Ids come from grantsgov_search_opportunities rows (opportunity_id); search there to find the record.` |
 | Upstream failure on one item | The whole call throws `upstream_unavailable`. A transient backend outage is not a per-record fact, and a partial answer would misreport which records exist. |
 
@@ -386,7 +395,8 @@ This block has no required field, so nothing needs to be written unconditionally
 | `no_identifiers` | `ValidationError` | Both lists empty or unset. | `Pass opportunity_ids from grantsgov_search_opportunities rows, or opportunity_numbers such as HRSA-27-005.` |
 | `too_many_identifiers` | `ValidationError` | More than 5 combined after de-duplication. | `Request at most 5 opportunities per call; split the list across several grantsgov_get_opportunity calls.` |
 | `upstream_unavailable` | `ServiceUnavailable`, `retryable: true`, `thrownBy: 'service'` | As in search. | `Grants.gov is not responding; wait a minute and call grantsgov_get_opportunity again.` |
-| `upstream_route_unavailable` | `ServiceUnavailable`, `retryable: false`, `thrownBy: 'service'` | As in search. | `The Grants.gov detail API route is not answering; the legacy API may have been retired, so report this to the server maintainer.` |
+| `rate_limited` | `RateLimited`, `retryable: true`, `thrownBy: 'service'` | As in search. | `Grants.gov is rate limiting requests; wait the retryAfter interval (or a minute) and call grantsgov_get_opportunity again.` |
+| `upstream_route_unavailable` | `ServiceUnavailable`, `retryable: false`, `thrownBy: 'service'` | HTTP 403 on `fetchOpportunity`, or on the `search2` route that resolves opportunity numbers. | `A Grants.gov API route is not answering; the legacy API may have been retired, so report this to the server maintainer.` |
 
 ### `grantsgov_list_reference`
 
@@ -397,7 +407,7 @@ This block has no required field, so nothing needs to be written unconditionally
 | Param | Type | Notes |
 |:------|:-----|:------|
 | `topic` | `z.enum(['agencies','eligibilities','funding_categories','funding_instruments','statuses','sort_options','keyword_syntax'])` | Required. |
-| `name_contains` | `optionalText(z.string().max(100))` | Local filter. Strict token match over label and code: normalize (lowercase, NFKD, strip diacritics and punctuation), every token must appear. For `agencies` it searches all 712 codes (top-level and sub-agencies) and ignores the top-level-only default. Applies to every topic. |
+| `name_contains` | `optionalText(z.string().max(100))` | Local filter. Strict token match over label and code: normalize (lowercase, NFKD, strip diacritics and punctuation), every token must appear. A value that normalizes to no tokens (`---`) matches nothing and returns its own notice. For `agencies` it searches all 712 codes (top-level and sub-agencies) and ignores the top-level-only default. Applies to every topic. |
 | `parent_code` | `optionalText(z.preprocess(normalizeAgencyCode, z.string().regex(AGENCY_CODE)))` | `agencies` only: list every code under this one (`HHS` → its 58 sub-agencies; `DOD-DARPA` → its offices). Any other topic → `filter_not_applicable`. Unknown → `unknown_parent_code`. |
 
 #### Data source
@@ -436,13 +446,13 @@ Static entries: `statuses` (four, with descriptions and counts: forecasted = ann
 ```ts
 enrichment: {
   totalCount: z.number().describe('Entries returned.'),
-  notice: z.string().optional().describe('Guidance when name_contains matched nothing.'),
+  notice: z.string().optional().describe('Guidance when name_contains matched nothing, or when parent_code has no sub-agencies.'),
 },
 ```
 
 `totalCount` is written first, before the static/live branch (`ctx.enrich.total(0)`), then overwritten with `ctx.enrich.total(entries.length)` after filtering. Entry lists are bounded (largest: `name_contains` over agencies ≤ 712; `parent_code: DOS` = 218 after folding the self-entry), and the tool has no cap input, so no truncation fields.
 
-Zero-match notice: `No {topic} entry matched "{name_contains}". Try a shorter name or a single distinctive word, or call grantsgov_list_reference with topic {topic} and no name_contains to browse the full list.`
+Zero-match notice: `No {topic} entry matched "{name_contains}". Try a shorter name or a single distinctive word, or call grantsgov_list_reference with topic {topic} and no name_contains to browse the full list.` When `parent_code` names an agency with no sub-agencies, `{parent_code} has no sub-agencies. Pass it directly as an agencies filter to grantsgov_search_opportunities.` takes precedence, with or without `name_contains`.
 
 #### Error contract
 
@@ -450,10 +460,11 @@ Zero-match notice: `No {topic} entry matched "{name_contains}". Try a shorter na
 |:-------|:-----|:-----|:---------|
 | `unknown_parent_code` | `NotFound` | `parent_code` is not a known agency code. | `Call grantsgov_list_reference with topic agencies and name_contains set to the agency name to find its code.` |
 | `filter_not_applicable` | `ValidationError` | `parent_code` given with a topic other than `agencies`. | `Remove parent_code, or call grantsgov_list_reference with topic agencies to list sub-agencies.` |
+| `rate_limited` | `RateLimited`, `retryable: true`, `thrownBy: 'service'` | The snapshot fetch got HTTP 429 through every retry, and no cached snapshot exists. | `Grants.gov is rate limiting requests; wait the retryAfter interval (or a minute) and call grantsgov_list_reference again.` |
 | `upstream_unavailable` | `ServiceUnavailable`, `retryable: true`, `thrownBy: 'service'` | The snapshot fetch failed after retries and no cached snapshot exists. | `Grants.gov is not responding; wait a minute and call grantsgov_list_reference again.` |
 | `upstream_route_unavailable` | `ServiceUnavailable`, `retryable: false`, `thrownBy: 'service'` | As above. | `The Grants.gov search API route is not answering; the legacy API may have been retired, so report this to the server maintainer.` |
 
-A stale snapshot is served when a refresh fails and a previous snapshot exists. `snapshot_date` shows its age.
+A stale snapshot is served when a refresh fails and a previous snapshot exists, and for one minute after that failure it is served without contacting Grants.gov again. `snapshot_date` shows its age.
 
 ---
 
@@ -485,7 +496,7 @@ Methods:
 | Method | Upstream | Returns |
 |:-------|:---------|:--------|
 | `search(body: Search2Body, ctx)` | 1× `search2` | `{ hitCount, hits: RawHit[], facets: RawFacets }` |
-| `scanClosingWindow(body, cutoffDate, ctx)` | 1–4× `search2` (sequential pages of 500) | `{ windowHits, postedTotal, nextCloseAfterWindow?, ceilingHit }` |
+| `scanClosingWindow(body, cutoffDate, ctx)` | 1–4× `search2` (sequential pages of 500) | `{ windowHits, postedTotal, nextCloseAfterWindow?, facets, ceilingHit }`. Each page is cut by the pure `cutClosingWindow(hits, today, cutoffDate)`, which the search tool also applies to the exact matches of an opportunity-number closing search. |
 | `resolveNumber(number, ctx)` | 1–2× `search2` (`oppNum` double-quoted, all statuses; uppercase retry) | `{ kind: 'unique', id } \| { kind: 'ambiguous', candidates } \| { kind: 'not_found' }` |
 | `fetchOpportunity(id, ctx)` | 1× `fetchOpportunity` | `{ kind: 'found', record: RawDetail } \| { kind: 'not_found' }` (history stripped before return) |
 | `getReference(ctx)` | 2× `search2` (`rows: 0`), cached 24 h | `ReferenceSnapshot` |
@@ -497,13 +508,13 @@ Methods:
 | Concern | Decision |
 |:--------|:---------|
 | Transport | A plain `fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal })` in one private `post()` helper. `signal` is `AbortSignal.any([attempt.signal, perAttempt])`, where `perAttempt` is an `AbortController` + `setTimeout(Math.min(15_000, remainingMs))` cleared in `finally` (never `AbortSignal.timeout()`, per the framework's Bun realm note). The destination is fixed, and no caller-supplied URL reaches it, so the SSRF guard in `fetchWithTimeout` buys nothing here. The throw-on-non-2xx helper is deliberately not used. |
-| Status accept-list | Per method: `search2` accepts `{200}`; `fetchOpportunity` accepts `{200, 404}`, with a 404 read as `not_found` in case the upstream ever moves a miss out of band (today a miss is a 200 skeleton). An accepted status is parsed and classified. A non-accepted status is never parsed as data: `403` → `upstream_route_unavailable` (non-retryable); anything else → `httpErrorFromResponse(response, { service: 'Grants.gov' })` (5xx → `ServiceUnavailable`, 429 → `RateLimited` with `Retry-After`). |
+| Status accept-list | Per method: `search2` accepts `{200}`; `fetchOpportunity` accepts `{200, 404}`, with a 404 read as `not_found` in case the upstream ever moves a miss out of band (today a miss is a 200 skeleton). An accepted status is parsed and classified. A non-accepted status is never parsed as data: `403` → `upstream_route_unavailable` (non-retryable); anything else → `httpErrorFromResponse(response, { service: 'Grants.gov', codeOverride })` (every 5xx → `ServiceUnavailable` tagged `upstream_unavailable`, with `codeOverride` keeping 504 off the helper's default `Timeout`; 429 → `RateLimited` tagged `rate_limited`, with `Retry-After`). |
 | Body classification | Non-JSON or HTML body → `serviceUnavailable` (transient). `errorcode !== 0` → `serviceUnavailable`. `fetchOpportunity` with `data.message` matching `/not available/i` → `serviceUnavailable` (transient). `data.id == null` with a "no record found" `errorMessages` entry → `not_found`. `search2` answers an unparseable parameter with a 200 skeleton that has no `searchParams` (array `oppStatuses`, `dateRange: "abc"`); schemas prevent every such input, so the parser treats `searchParams` as optional and never classifies on it. |
-| Reason propagation | Every service throw carries its contract reason and the calling tool's hint: `serviceUnavailable(msg, { reason: 'upstream_unavailable', ...ctx.recoveryFor('upstream_unavailable') })`, and `httpErrorFromResponse(response, { service: 'Grants.gov', data: { reason, ...ctx.recoveryFor(reason) } })` for 5xx. The reason names are shared across the three tools and each tool's contract supplies its own recovery string, so the service stays tool-agnostic while each hint names the right tool to re-call. |
+| Reason propagation | Every service throw carries its contract reason and the calling tool's hint: `serviceUnavailable(msg, { reason: 'upstream_unavailable', ...ctx.recoveryFor('upstream_unavailable') })`, and `httpErrorFromResponse(response, { service: 'Grants.gov', data: { reason, ...ctx.recoveryFor(reason) } })` for 5xx and 429. The reason names are shared across the three tools and each tool's contract supplies its own recovery string, so the service stays tool-agnostic while each hint names the right tool to re-call. |
 | Retry boundary | `withRetry` wraps fetch + parse + body classification per upstream call: `maxRetries: 2`, `baseDelayMs: 500` (observed latency 0.25–1.2 s), `deadlineMs: 25_000`, threading `attempt.signal` and `remainingMs` into the fetch. |
 | Pacing | No published limit. One `createPacer({ name: 'grants-gov', maxConcurrent: 4 })` fronts every upstream call, so a 5-item get or a burst of agent calls never opens more than 4 concurrent requests from this process. `withRetry` sits outside the pacer, so each attempt re-queues. Disposed in `createApp({ teardown })`. |
 | Fan-out | `grantsgov_get_opportunity` resolves numbers, then fetches records with `Promise.all` through the pacer (≤ 5). One failure throws the whole call (see Outcome states). |
-| Reference cache | Module-level `{ snapshot, fetchedAt, inflight }`. Refresh when older than 24 h. A failed refresh with a previous snapshot serves the stale one and logs a warning. Process-local, not tenant-scoped (public vocabulary). No `ctx.state`. |
+| Reference cache | Module-level `{ snapshot, fetchedAt, inflight }`. Refresh when older than 24 h. A failed refresh with a previous snapshot serves the stale one, logs a warning, and blocks further refresh attempts for 60 s so every call during an outage does not re-run the retry ladder. The build is shared by concurrent callers, so a failure with no snapshot is re-issued to each caller with its own tool's recovery hint. Process-local, not tenant-scoped (public vocabulary). No `ctx.state`. |
 | Cancellation | `ctx.signal` threads into `withRetry`; the closing-window scan checks `ctx.signal.aborted` between pages. |
 
 ### Response-size budget
@@ -659,6 +670,7 @@ Each step is independently testable.
 | `include_unrestricted` defaults true. | Code `99` (open to any applicant type) is disjoint from the specific codes. Filtering on `12` alone hides every unrestricted opportunity a nonprofit can apply to. The toggle exists for "targeted at tribes specifically" searches. |
 | `posted_within_days` rejects `closed`/`archived` statuses. | Upstream replaces the status filter when `dateRange` is set, returning forecasted/posted rows under an archived request. |
 | `closing_within_days` forces `posted` + close-date sort and conflicts on explicit contrary values. | The window scan depends on monotonic close-date order over posted records. Silently overriding an explicit input would hide the change from the caller. |
+| `closing_within_days` with `opportunity_number` cuts the window from one page of exact matches instead of running the paged scan. | The scan stops at the first row past the window and counts every upstream hit, so non-equal `oppNum` hits leaked into the empty-window notice and the uppercase-retry decision. A quoted number returns a handful of rows, so one local page gives exact counts at no extra cost. |
 | Sort default: relevance with a keyword, else newest-posted first. | Without a keyword, upstream default order is arbitrary. `relevance` is sent by omitting `sortBy`, since every literal relevance value returns 0. |
 | Close dates carry a `close_date_kind` (`fixed`/`none_listed`/`placeholder`), and the listed date is kept. | Agencies use `01/01/2099` and posting+50-years (NSF "accepted anytime") as stand-ins. Reporting them as deadlines misleads, and dropping them would discard upstream data. The ≥ 25-years rule keeps real long-running BAAs (2034–2044) as fixed. |
 | `today` is computed in US Eastern Time. | Grants.gov publishes dates in ET, and status flips to closed on the ET day after the close date (probe: rows closing 09/23 were `closed` at 01:25 ET 09/24). |
@@ -669,6 +681,8 @@ Each step is independently testable.
 | Revision history is dropped and reported as `past_revision_count`. | `fetchOpportunity` has no field selection, and history is up to 97% of the payload (NSF 21-595: 713 of 733 KB). |
 | A plain `fetch` with a per-method accept-list (`search2` {200}; `fetchOpportunity` {200, 404}), with 403 classified as `upstream_route_unavailable`. | A miss is a result, so it must never pass through a helper that throws on non-2xx. Today it arrives in-band on a 200, and a 404 is accepted in case that changes. A 403 "Missing Authentication Token" is what a retired or moved gateway route returns, and it should read as that, not as a generic outage. |
 | One process-wide pacer (`maxConcurrent: 4`) and no env config. | There is no published limit, so the server stays polite for a hosted deployment without inventing a rate. Keyless with fixed URLs leaves nothing to configure. |
+| Every 5xx surfaces as `ServiceUnavailable` / `upstream_unavailable`, 504 included, and 429 is its own `rate_limited` contract reason. | The contract promises one code per reason; the framework helper's default maps 504 to `Timeout`, which would split one upstream outage across two codes. A 429 is a predictable failure the agent should wait out, not an untyped error. |
+| A `name_contains` value with no letters or digits matches nothing, with its own notice. | With no tokens, the every-token rule is vacuously true and would return the whole list. Treating it as unset would also widen silently; an explicit empty result tells the caller the value was unusable. |
 | HTML → text in-house, no dependency. | The upstream markup is a small tag set (surveyed), and a converter plus entity table is ~50 lines. That beats adding a parser dependency. |
 | No resources, no prompts, no DataCanvas. | Tools cover every record. This is discovery over categorical metadata (find, then drill in), not rows an agent would query with SQL. |
 | Deferred: `grantsgov_read_attachment` (NOFO PDF → outlined text). | Required forms and detailed eligibility often live only in the PDF, but PDF parsing and large-document handling are a separate build. v1 returns `download_url`s. |
