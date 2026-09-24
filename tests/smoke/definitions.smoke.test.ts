@@ -1,45 +1,69 @@
 /**
- * @fileoverview Smoke coverage for every definition shipped by the scaffold.
+ * @fileoverview Smoke coverage for every registered definition, on the paths
+ * that need no upstream call.
  * @module tests/smoke/definitions.smoke.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
-import { echoPrompt } from '@/mcp-server/prompts/definitions/echo.prompt.js';
-import { echoResource } from '@/mcp-server/resources/definitions/echo.resource.js';
-import { echoAppUiResource } from '@/mcp-server/resources/definitions/echo-app-ui.app-resource.js';
-import { echoTool } from '@/mcp-server/tools/definitions/echo.tool.js';
-import { echoAppTool } from '@/mcp-server/tools/definitions/echo-app.app-tool.js';
+import { grantsgovGetOpportunity } from '@/mcp-server/tools/definitions/grantsgov-get-opportunity.tool.js';
+import { grantsgovListReference } from '@/mcp-server/tools/definitions/grantsgov-list-reference.tool.js';
+import { grantsgovSearchOpportunities } from '@/mcp-server/tools/definitions/grantsgov-search-opportunities.tool.js';
+import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 
-describe('scaffold definition smoke test', () => {
-  it('executes the shipped tool, resource, and prompt definitions', async () => {
-    // `echoTool` declares an error contract, so its handler wants a context
-    // typed against it — passing `errors` narrows what `createMockContext` returns.
-    const ctx = createMockContext({ errors: echoTool.errors });
-    const toolResult = await echoTool.handler(echoTool.input.parse({ message: 'smoke' }), ctx);
-    const resourceResult = await echoResource.handler(
-      echoResource.params!.parse({ message: 'smoke' }),
-      ctx,
-    );
-    const promptMessages = await echoPrompt.generate(echoPrompt.args!.parse({ message: 'smoke' }));
-    const appResult = await echoAppTool.handler(
-      echoAppTool.input.parse({ message: 'smoke app' }),
-      ctx,
-    );
-    const appContent = echoAppTool.format?.(appResult);
-    const appHtml = await echoAppUiResource.handler(
-      echoAppUiResource.params!.parse({}),
-      createMockContext({ uri: new URL('ui://template-echo-app/app.html') }),
-    );
-
-    expect(toolResult).toEqual({ message: 'smoke' });
-    expect(resourceResult).toEqual({ message: 'smoke' });
-    expect(promptMessages).toEqual([
-      { role: 'user', content: { type: 'text', text: 'Echo: smoke' } },
+describe('definition smoke test', () => {
+  it('registers every tool through the barrel', () => {
+    expect(allToolDefinitions.map((definition) => definition.name)).toEqual([
+      'grantsgov_search_opportunities',
+      'grantsgov_get_opportunity',
+      'grantsgov_list_reference',
     ]);
-    expect(appResult).toEqual(expect.schemaMatching(echoAppTool.output));
-    expect(appContent?.[0]).toEqual({ type: 'text', text: JSON.stringify(appResult) });
-    expect(appHtml).toContain('<title>Echo App</title>');
-    expect(appHtml).toContain('app.callServerTool');
+  });
+
+  it('rejects a conflicting search before any upstream call', async () => {
+    const ctx = createMockContext({ errors: grantsgovSearchOpportunities.errors });
+    const input = grantsgovSearchOpportunities.input.parse({
+      keyword: '',
+      statuses: ['Closed'],
+      closing_within_days: '7',
+    });
+
+    await expect(grantsgovSearchOpportunities.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'filter_conflict' },
+    });
+  });
+
+  it('rejects a get with no identifiers before any upstream call', async () => {
+    const ctx = createMockContext({ errors: grantsgovGetOpportunity.errors });
+    const input = grantsgovGetOpportunity.input.parse({
+      opportunity_ids: [],
+      opportunity_numbers: [' '],
+    });
+
+    await expect(grantsgovGetOpportunity.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_identifiers' },
+    });
+  });
+
+  it('lists a static reference topic and renders it', async () => {
+    const ctx = createMockContext({ errors: grantsgovListReference.errors });
+    const result = await grantsgovListReference.handler(
+      grantsgovListReference.input.parse({
+        topic: 'keyword_syntax',
+        name_contains: '',
+        parent_code: '',
+      }),
+      ctx,
+    );
+    const [block] = grantsgovListReference.format?.(result) ?? [];
+
+    expect(result).toEqual(expect.schemaMatching(grantsgovListReference.output));
+    expect(result.entries.length).toBeGreaterThan(0);
+    expect(result.snapshot_date).toBeUndefined();
+    expect(getEnrichment(ctx)).toMatchObject({ totalCount: result.entries.length });
+    expect(block).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('| Code | Label | Notes |'),
+    });
   });
 });
