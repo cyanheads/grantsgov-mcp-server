@@ -51,10 +51,10 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="grantsgov-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="Search Grants.gov federal funding opportunities, read full records (eligibility, awards, deadlines, attachments), and decode filter codes via MCP. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.source=""
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/grantsgov-mcp-server"
 
 # Copy dependency manifests
 COPY package.json bun.lock ./
@@ -70,8 +70,8 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --production --omit=peer --frozen-lockfile --ignore-scripts
 
 # Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
-# These are not bundled by default to keep the base image lean. Enable at build time
-# with: docker build --build-arg OTEL_ENABLED=true
+# Installed by default; omit them for a leaner image with:
+# docker build --build-arg OTEL_ENABLED=false
 ARG OTEL_ENABLED=true
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     if [ "$OTEL_ENABLED" = "true" ]; then \
@@ -90,28 +90,11 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
 
-# Mirror CLI (MirrorService adopters only — Tier 3, opt-in):
-# Copy your mirror lifecycle scripts and emit a runtime tsconfig so Bun resolves
-# the @/ path alias against ./dist/ rather than ./src/.
-# See the api-mirror skill for the full recipe.
-#
-# COPY --from=build /usr/src/app/scripts/<your>-mirror-init.ts \
-#                   /usr/src/app/scripts/<your>-mirror-refresh.ts \
-#                   /usr/src/app/scripts/<your>-mirror-verify.ts \
-#                   /usr/src/app/scripts/_mirror-context.ts \
-#                   ./scripts/
-# RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > tsconfig.json
-
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.
 
 # Create and set permissions for the log directory, assigning ownership to the 'bun' user.
 RUN mkdir -p /var/log/grantsgov-mcp-server && chown -R bun:bun /var/log/grantsgov-mcp-server
-
-# Writable data dirs for on-disk SQLite stores (catalog index / observations
-# mirror), owned by the runtime user. Mount a volume over either in production.
-RUN mkdir -p /usr/src/app/.cache /usr/src/app/.mirror \
-  && chown -R bun:bun /usr/src/app/.cache /usr/src/app/.mirror
 
 # Switch to the non-root user
 USER bun

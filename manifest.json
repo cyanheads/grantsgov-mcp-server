@@ -2,11 +2,11 @@
   "manifest_version": "0.3",
   "name": "grantsgov-mcp-server",
   "version": "0.1.0",
-  "description": "Search US federal grant opportunities on Grants.gov and read full opportunity detail — eligibility, award range, deadlines, attachments. Keyless. STDIO or Streamable HTTP.",
+  "description": "Search Grants.gov funding opportunities and read full records: eligibility, awards, deadlines.",
   "author": { "name": "cyanheads" },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cyanheads/grantsgov-mcp-server.git"
+    "url": "https://github.com/cyanheads/grantsgov-mcp-server"
   },
   "homepage": "https://github.com/cyanheads/grantsgov-mcp-server#readme",
   "license": "Apache-2.0",
@@ -27,6 +27,6 @@
     "runtimes": { "node": ">=24.0.0" }
   },
   "tools_generated": true,
-  "prompts_generated": true,
+  "prompts_generated": false,
   "user_config": {}
 }

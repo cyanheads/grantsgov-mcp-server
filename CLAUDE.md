@@ -1,43 +1,27 @@
-# Developer Protocol
+# Agent Protocol
 
-**Server:** grantsgov-mcp-server
+**Server:** grantsgov-mcp-server (npm `@cyanheads/grantsgov-mcp-server`)
 **Version:** 0.1.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
-**Zod:** ^4.4.3
+**Upstream:** Grants.gov legacy REST API (`https://api.grants.gov/v1/api`: `POST search2`, `POST fetchOpportunity`) — keyless, no env config
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
----
-
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `framework-skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `framework-skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `framework-skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
+> **Design record:** `docs/design.md` holds the probed upstream behavior (every silent-widening trap, with counts), the response-size budget, and the decisions log. Read it before changing a filter, the keyword compiler, or a service method, and update it when behavior changes.
 
 ---
 
 ## What's Next?
 
-When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
+When the user asks what to do next, what's left, or needs direction, suggest relevant options based on the current project state:
 
-1. **Re-run the `setup` skill** — ensures CLAUDE.md, skills, structure, and metadata are populated and up to date with the current codebase
-2. **Run the `design-mcp-server` skill** — if the tool/resource surface hasn't been mapped yet, work through domain design
-3. **Add tools/resources/prompts** — scaffold new definitions using the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt` skills
-4. **Add services** — scaffold domain service integrations using the `add-service` skill
-5. **Add tests** — scaffold tests for existing definitions using the `add-test` skill
-6. **Field-test definitions** — exercise tools/resources/prompts with real inputs using the `field-test` skill, get a report of issues and pain points
-7. **Run `devcheck`** — lint, format, typecheck, and security audit
-8. **Run the `security-pass` skill** — audit handlers for MCP-specific security gaps: output injection, scope blast radius, input sinks, tenant isolation
-9. **Run the `polish-docs-meta` skill** — finalize README, CHANGELOG, metadata, and agent protocol for shipping
-10. **Run the `maintenance` skill** — investigate changelogs, adopt upstream changes, and sync skills after `bun update --latest`
+1. **Run the `field-test` skill** — exercise the three tools against live Grants.gov with real and adversarial inputs
+2. **Run the `security-pass` skill** — audit handlers for MCP-specific security gaps: output injection, scope blast radius, input sinks
+3. **Run the `tool-defs-analysis` skill** — audit the definition language the LLM reads
+4. **Add a tool** — the deferred `grantsgov_read_attachment` (NOFO PDF → outlined text) is in the design doc's decisions log; scaffold with the `add-tool` skill
+5. **Run the `polish-docs-meta` skill** — re-sync README, metadata, and this file after a surface change
+6. **Run the `maintenance` skill** — investigate changelogs, adopt upstream changes, and sync skills after `bun update --latest`
 
 Tailor suggestions to what's actually missing or stale — don't recite the full list every time.
 
@@ -55,158 +39,154 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ---
 
+## Surface
+
+| Tool | Upstream calls | Notes |
+|:-----|:---------------|:------|
+| `grantsgov_search_opportunities` | 1× `search2`; 1–4 pages of 500 for `closing_within_days`; 1–2 for `opportunity_number`; plus the cached reference snapshot when `agencies` / `eligibilities` / `funding_categories` is set | Three modes share one enrichment contract: plain upstream page, exact opportunity-number match paged locally, server-side closing-window scan |
+| `grantsgov_get_opportunity` | `search2` per opportunity number (resolution, all statuses), then `fetchOpportunity` per id, fanned out through the pacer | Up to 5 identifiers; misses and ambiguous numbers are `unresolved[]` entries, upstream failures throw the whole call |
+| `grantsgov_list_reference` | The reference snapshot (2× `search2` with `rows: 0`, cached 24 h), or none for `sort_options` / `keyword_syntax` | Every recovery hint for an unknown code routes here |
+
+No resources, no prompts, no DataCanvas — every record is reachable through `grantsgov_get_opportunity` (see the decisions log).
+
+### Service
+
+`GrantsGovService` (`src/services/grants-gov/grants-gov-service.ts`) is the only upstream boundary: `search`, `fetchOpportunity`, `resolveNumber`, `scanClosingWindow`, `getReference`, `dispose`. Init in `createApp({ setup })`, dispose in `teardown` (it owns the pacer's timer).
+
+- **Transport:** plain `fetch` with a per-endpoint status accept-list (`search2` {200}; `fetchOpportunity` {200, 404}). A non-accepted status is never parsed as data: 403 → `upstream_route_unavailable` (non-retryable — the legacy route is gone), 5xx → `upstream_unavailable`, 429 → `rate_limited`. A 200 with HTML, bad JSON, `errorcode !== 0`, or a "not available" message is `upstream_unavailable`.
+- **Resilience:** `withRetry` (2 retries, 25 s deadline) outside, the process-wide pacer (`maxConcurrent: 4`) inside, so each attempt re-queues. Per-attempt timeout 15 s.
+- **Reason propagation:** every service throw carries `data.reason` plus the calling tool's `ctx.recoveryFor(reason)`. Each tool declares `upstream_unavailable`, `rate_limited`, and `upstream_route_unavailable` with `thrownBy: 'service'`, each with its own tool-named recovery text.
+- **Reference snapshot:** process-local (public vocabulary, not tenant data — never `ctx.state`), 24 h TTL, one in-flight build shared by concurrent callers. A failed refresh serves the stale snapshot and blocks retries for 60 s; a failure with no snapshot is re-issued to each caller with its own recovery hint.
+- **`Search2Body` is a closed interface.** Grants.gov ignores unknown keys and silently widens to the default scope, so no caller input is ever spread into a body. A new filter means a new typed key, probed first.
+
+### Upstream traps the tools close
+
+Each returns HTTP 200 with a plausible count, so the tool boundary maps the input to the working form or rejects it with a typed error. Full probe table in `docs/design.md`.
+
+| Input | Upstream behavior | Where it's handled |
+|:------|:------------------|:-------------------|
+| Multi-value filters | Pipe-joined string only; arrays and commas return 0 | Handler joins with `\|` |
+| Agency codes | A bare parent matches only records filed at exactly that code; codes with spaces split into terms | `encodeAgencyFilter` (`reference.ts`): `CODE\|CODE-*` for subtrees (never `CODE*`, which catches unrelated codes), codes with spaces quoted with descendants listed explicitly |
+| Lowercase codes, single-digit eligibility | Match nothing | Schema normalization (uppercase, zero-pad) |
+| `oppNum` | Query-parsed (`*` wildcards, spaces split), case-sensitive, returns non-equal hits | `quoteOppNum` always quotes; `isSameOpportunityNumber` post-filters; one uppercase retry on a lowercase miss |
+| `dateRange` with `closed`/`archived` | Drops the status filter | `filter_conflict` |
+| No close-date filter exists | — | `scanClosingWindow` over `closeDate\|asc` posted pages, cut by `cutClosingWindow`, 2,000-row ceiling |
+| Relevance sort | Every literal `sortBy` value returns 0 | Sent by omitting `sortBy` |
+
+### Keyword grammar
+
+`compileKeyword` (`src/services/grants-gov/keyword.ts`) is a pure function returning `{ ok: true, compiled, andJoined } | { ok: false, problem, hint? }`. Rules:
+
+- Bare adjacent terms are joined with `AND` (upstream implicit OR widens 10–200×).
+- `and` / `or` / `not` standing alone are operators in any case, uppercased; `&&` / `||` read as `AND` / `OR`; a leading `-term` is `NOT term`.
+- A token with an internal `-` or `.` (`COVID-19`, `K-12`, `93.866`) is auto-quoted as a phrase; wildcard tokens stay bare so a trailing `*` keeps working.
+- `: ~ ? [ ] { } ^ \ / ! +` are replaced by a space.
+- Rejected as `invalid_keyword`: a field prefix (`agency:NSF` — the hint names the filter that does the job), AND and OR mixed in one grouping level without parentheses (the hint spells out both groupings), unbalanced quotes or parentheses, a leading `AND`/`OR`, a trailing or doubled operator, empty parentheses, or nothing searchable left.
+
+**Keep three places in sync** when the grammar changes: `keyword.ts`, the `keyword` `.describe()` and tool description in `grantsgov-search-opportunities.tool.ts`, and the `keyword_syntax` entries in `grantsgov-list-reference.tool.ts`.
+
+### Dates and deadlines
+
+`todayET()` is the reference day everywhere: Grants.gov publishes in US Eastern Time and flips status to closed on the ET day after the close date. `closeDateKind` returns `placeholder` for close dates ≥ 25 years out (`01/01/2099`, NSF posting + 50 years), and the listed date is always kept. Search rows for forecasts carry no close date (`none_listed`); the estimate lives on the `grantsgov_get_opportunity` record.
+
+### Untrusted text
+
+Agency-authored text (titles, descriptions, eligibility narratives, contact blocks, file names, labels) is data. `html-to-text.ts` normalizes HTML and bare-entity text for both surfaces; `structuredContent` otherwise stays verbatim. In `format()`, use the `render.ts` helpers: `inline()` for text inside a line, `tableCell()` inside a table cell, `blockquote()` for multi-line fields. Never interpolate raw upstream text into `content[]`.
+
+---
+
 ## Patterns
+
+### Input schemas
+
+`src/mcp-server/tools/input-schemas.ts` holds the conventions every tool uses:
+
+- **Blank means unset.** `optionalText(schema)` and `optionalList(item, max)` read `''`, whitespace, and emptied lists as `undefined`. Never `.min(1)` on an optional string.
+- **Advertise the raw form, validate the normalized one.** `normalizedString(raw, message, normalize, normalized)` builds `z.string().regex(raw).transform(normalize).pipe(normalized)`. `tools/list` emits only the first stage, so `raw` (built with `rawPattern()`, no regex flags) must admit every spelling the `.describe()` promises — any case, surrounding whitespace, blank. A `z.preprocess` in front of a pattern would advertise the post-normalization pattern, and a client validating against `tools/list` would reject `hhs`, `7`, or `"363423"` before the server sees them.
+- Enum inputs keep their canonical `z.enum` behind a `trimLower` / `trimUpper` preprocess; digit-string numbers go through `numberFromDigits`.
 
 ### Tool
 
+Abridged from `grantsgov-list-reference.tool.ts`:
+
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getGrantsGovService } from '@/services/grants-gov/grants-gov-service.js';
+import { resolveAgencyScope } from '@/services/grants-gov/reference.js';
+import { AGENCY_CODE_INPUT, optionalText, trimLower } from '../input-schemas.js';
+import { tableCell } from '../render.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const grantsgovListReference = tool('grantsgov_list_reference', {
+  title: 'List Grants.gov Reference Codes',
+  description: 'List the codes Grants.gov search filters accept, with labels and live opportunity counts: …',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    topic: z.preprocess(trimLower, z.enum(TOPICS)).describe('Which list to return: …'),
+    name_contains: optionalText(z.string().max(100)).describe('Keep only entries whose label or code contains every word given, …'),
+    parent_code: optionalText(AGENCY_CODE_INPUT).describe('Agencies only: list every code under this agency at any depth …'),
   }),
-  output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
-  }),
-  auth: ['inventory:read'],
+  output: z.object({ /* topic, entries[], snapshot_date */ }),
+  enrichment: {
+    totalCount: z.number().describe('Entries returned.'),
+    notice: z.string().optional().describe('Guidance when name_contains matched nothing, …'),
+  },
+
+  errors: [
+    { reason: 'unknown_parent_code', code: JsonRpcErrorCode.NotFound,
+      when: 'parent_code is not a known agency code.',
+      recovery: 'Call grantsgov_list_reference with topic agencies and name_contains set to the agency name to find its code.' },
+    { reason: 'upstream_unavailable', code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The snapshot fetch failed after retries and no cached snapshot exists.',
+      recovery: 'Grants.gov is not responding; wait a minute and call grantsgov_list_reference again.',
+      retryable: true, thrownBy: 'service' },
+    // … filter_not_applicable, rate_limited, upstream_route_unavailable
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    ctx.enrich.total(0);
+    const { topic, parent_code: parentCode } = input;
+    const snapshot = await getGrantsGovService().getReference(ctx);
+    if (topic === 'agencies' && parentCode !== undefined) {
+      const scope = resolveAgencyScope(snapshot, parentCode);
+      if (!scope) {
+        throw ctx.fail('unknown_parent_code', `No agency code "${parentCode}" in the Grants.gov vocabulary.`, {
+          parentCode,
+          ...ctx.recoveryFor('unknown_parent_code'),
+        });
+      }
+    }
+    // … build entries, filter by name_contains, set notices
+    ctx.enrich.total(entries.length);
+    return { topic, entries, snapshot_date: snapshot.fetchedAt };
   },
 
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  format: (result) => [{ type: 'text', text: /* table built with tableCell() */ '' }],
 });
 ```
-
-### Resource
-
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
-
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
-
-### Server config
-
-```ts
-// src/config/server-config.ts — lazy-parsed, separate from framework config
-import { z } from '@cyanheads/mcp-ts-core';
-import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
-
-const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
-});
-
-let _config: z.infer<typeof ServerConfigSchema> | undefined;
-export function getServerConfig() {
-  _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
-  });
-  return _config;
-}
-```
-
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
-
-For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
 ### Server identity and instructions
 
-`createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
+`src/index.ts` sets `name` and `title` to the unscoped repo name (`lint:packaging` enforces the match), registers `allToolDefinitions`, and carries the server `instructions` string from the design doc. `description` is never set there — `package.json` is the canonical source.
 
-```ts
-await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
-});
-```
+### Server config
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
-
-### Session posture and shutdown
-
-Two more `createApp()` options shape how the server runs rather than how it presents itself:
-
-```ts
-await createApp({
-  sessionMode: 'stateless',          // or { default: 'stateful', require: 'stateful' }
-  setup(core) { startMyWatcher(core.config); },
-  async teardown() { await stopMyWatcher(); },
-});
-```
-
-`sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Add `require: 'stateful'` when a tool asks the caller for input mid-handler via `ctx.requestInput`: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
-
-`teardown(core)` is the `setup()` counterpart — release a watcher, socket, or non-`unref()`'d timer there. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
+None. The API is keyless and the base URL is a constant in the service, so there is no `src/config/server-config.ts`. Adding an env var means creating it (`parseEnvConfig` + Zod, see the framework docs) and declaring the variable in `server.json`, `manifest.json` (`mcp_config.env` + `user_config`), `.claude-plugin/plugin.json` (`userConfig` + `env`), `.codex-plugin/mcp.json` (`env_vars`), `.env.example`, and the README Configuration table.
 
 ---
 
 ## Context
 
-Handlers receive a unified `ctx` object. Key properties:
+Handlers receive a unified `ctx` object. This server uses:
 
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
-| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
-| `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.requestId` | Unique request ID. |
-| `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
+| `ctx.enrich` | Success-path agent context — `ctx.enrich({...})` or `.notice()` / `.total()` / `.truncated()`. Lands only for fields the definition declares in `enrichment`. Search uses it for `totalCount`, `next_offset`, `effective_keyword`, `applied_filters`, and zero-hit notices. |
+| `ctx.fail(reason, …)` | Throws a typed contract error for a declared reason. |
+| `ctx.recoveryFor(reason)` | Returns `{ recovery: { hint } }` for a declared reason — spread into `ctx.fail` data, and passed by the service into its own throws. |
+| `ctx.signal` | `AbortSignal` for cancellation — threaded into `withRetry`; the closing-window scan checks it between pages. |
 
 ---
 
@@ -214,43 +194,15 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. Pass `ctx.recoveryFor('reason')` as the throw's data to put it on the wire (`data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim); override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Forwarding it is lint-enforced per throw site (`error-contract-recovery-unforwarded`). Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
-
-```ts
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-
-errors: [
-  { reason: 'no_match', code: JsonRpcErrorCode.NotFound,
-    when: 'No item matched the query',
-    recovery: 'Broaden the query or check the spelling and try again.' },
-],
-async handler(input, ctx) {
-  const item = await db.find(input.id);
-  if (!item) throw ctx.fail('no_match', `No item ${input.id}`, ctx.recoveryFor('no_match'));
-  return item;
-}
-```
+**Typed error contract on every tool.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` and throw with `ctx.fail(reason, message, data)`. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. Forward it with `ctx.recoveryFor('reason')`, or pass an explicit `{ recovery: { hint } }` when runtime context sharpens it (the search tool names the unknown agency code in its hint). Forwarding is lint-enforced per throw site (`error-contract-recovery-unforwarded`). Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
 
 **Declare contracts inline on each tool.** The contract is part of the tool's public surface — one file should give the full picture. Don't extract a shared `errors[]` constant; per-tool repetition is the intended cost of locality.
 
-**Fallback (no contract entry fits):** throw via factories or plain `Error`.
+**Misses are results, outages are errors.** An unresolved id or number is an `unresolved[]` entry with guidance; a zero-hit search is an empty page with a notice. Only invalid input and upstream failure throw.
 
-```ts
-// Error factories — explicit code
-import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-throw notFound('Item not found', { itemId });
-throw serviceUnavailable('API unavailable', { url }, { cause: err });
+**Service-layer throws** use factories (`serviceUnavailable`, `httpErrorFromResponse`) with `data: { reason, ...ctx.recoveryFor(reason) }`, so clients see the same `error.data.reason` they'd see from `ctx.fail`.
 
-// Plain Error — framework auto-classifies from message patterns
-throw new Error('Item not found');           // → NotFound
-throw new Error('Invalid query format');     // → ValidationError
-
-// McpError — when no factory exists for the code
-import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-throw new McpError(JsonRpcErrorCode.InitializationFailed, 'Connection failed', { pool: 'primary' });
-```
-
-See framework CLAUDE.md and the `api-errors` skill for the full auto-classification table, all available factories, and the contract reference.
+See framework CLAUDE.md and the `api-errors` skill for the full auto-classification table, all factories, and the contract reference.
 
 ---
 
@@ -258,20 +210,24 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
-  config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
-  services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
-  mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+  index.ts                                    # createApp(): tools, instructions, service setup/teardown
+  mcp-server/tools/
+    input-schemas.ts                          # Blank-as-unset, raw-form pattern inputs, shared code inputs
+    render.ts                                 # inline / tableCell / blockquote for agency text in format()
+    definitions/
+      index.ts                                # allToolDefinitions barrel
+      grantsgov-search-opportunities.tool.ts
+      grantsgov-get-opportunity.tool.ts
+      grantsgov-list-reference.tool.ts
+  services/grants-gov/
+    grants-gov-service.ts                     # Upstream client: fetch, retry, pacer, reference cache
+    keyword.ts                                # compileKeyword
+    reference.ts                              # Snapshot build, agency tree, agency filter encoding
+    normalize.ts                              # ET dates, close-date kind, money/count parsing, entities
+    html-to-text.ts                           # Agency HTML → plain text
+    types.ts                                  # Raw upstream shapes (all optional) and service results
+tests/                                        # Mirrors src/; fixtures/ holds trimmed live responses and the failure harness
+docs/design.md                                # Probed API behavior, budgets, decisions log
 ```
 
 ---
@@ -280,10 +236,11 @@ src/
 
 | What | Convention | Example |
 |:-----|:-----------|:--------|
-| Files | kebab-case with suffix | `search-docs.tool.ts` |
-| Tool/resource/prompt names | snake_case | `search_docs` |
-| Directories | kebab-case | `src/services/doc-search/` |
-| Descriptions | Single string or template literal, no `+` concatenation | `'Search items by query and filter.'` |
+| Files | kebab-case with suffix | `grantsgov-get-opportunity.tool.ts` |
+| Tool names | snake_case, `grantsgov_` prefix | `grantsgov_get_opportunity` |
+| Input/output fields | snake_case | `opportunity_numbers`, `close_date_kind` |
+| Directories | kebab-case | `src/services/grants-gov/` |
+| Descriptions | Single string or template literal, no `+` concatenation | `'Read the full Grants.gov record for up to 5 opportunities, …'` |
 
 ---
 
@@ -339,46 +296,45 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Commands
 
-**Runtime:** Scripts use Bun's native TypeScript execution — `bun run <cmd>` is the standard invocation. `npm run <cmd>` also works (npm delegates to bun).
-
 | Command | Purpose |
 |:--------|:--------|
 | `bun run build` | Compile TypeScript |
 | `bun run rebuild` | Clean + build |
 | `bun run clean` | Remove build artifacts |
-| `bun run devcheck` | Lint + format + typecheck + security + changelog sync |
-| `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
-| `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
-| `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
-| `bun run list-skills` | Print the skill registry |
-| `bun run tree` | Generate directory structure doc |
+| `bun run devcheck` | Lint + format + typecheck + security + packaging alignment + changelog sync |
+| `bun run tree` | Regenerate `docs/tree.md` |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
-| `bun run start:stdio` | Production mode (stdio) |
-| `bun run start:http` | Production mode (HTTP) |
+| `bun run test:coverage` | Run tests with coverage |
+| `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
+| `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
+| `bun run list-skills` | Print the skill registry |
+| `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
+| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, plugin manifest identity, README version badge (run by devcheck) |
+| `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
-| `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
+| `bun run release:github` | Create the GitHub Release from an annotated tag and attach the `.mcpb` bundle |
+| `bun run publish-mcp` | Log in to the MCP Registry and publish `server.json` |
+| `bun run start:stdio` | Production mode (stdio) |
+| `bun run start:http` | Production mode (HTTP) |
 
-**CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
+**CI is one file.** `.github/workflows/codeql.yml` is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
 ---
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`bun run bundle` produces `dist/grantsgov-mcp-server.mcpb` for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. MCPB is stdio-only — HTTP and Docker deployments are unaffected. The `release-and-publish` skill attaches the bundle to the GitHub Release at a stable `releases/latest/download/grantsgov-mcp-server.mcpb` URL that powers the README install badge.
 
-**Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
-
-**README install badges** (Claude Desktop `.mcpb`, Cursor, VS Code) and the `base64` / `encodeURIComponent` config-generation commands are ship-time concerns — run the `polish-docs-meta` skill, which carries the badge format, layout, and generation snippets in `framework-skills/polish-docs-meta/references/readme.md`.
+`manifest.json` declares no `user_config` (the server has no settings). `lint:packaging` (run by `devcheck`) keeps it in step with `server.json` and the plugin manifests; see *Server config* above for what an env var would touch.
 
 ---
 
 ## Changelog
 
-Directory-based, grouped by minor series via the `.x` semver-wildcard convention. Source of truth: `changelog/<major.minor>.x/<version>.md` (e.g. `changelog/0.1.x/0.1.0.md`) — one file per release, shipped in the npm package. At release, author the per-version file with a concrete version and date, then run `npm run changelog:build` to regenerate the rollup. `changelog/template.md` is a **pristine format reference** — never edited or moved; read it for the frontmatter + section layout when scaffolding. `CHANGELOG.md` is a **navigation index** (header + link + summary per version), regenerated by `npm run changelog:build` — devcheck hard-fails on drift; never hand-edit it.
+Directory-based, grouped by minor series via the `.x` semver-wildcard convention. Source of truth: `changelog/<major.minor>.x/<version>.md` (e.g. `changelog/0.1.x/0.1.0.md`) — one file per release, shipped in the npm package. At release, author the per-version file with a concrete version and date, then run `bun run changelog:build` to regenerate the rollup. `changelog/template.md` is a **pristine format reference** — never edited or moved; read it for the frontmatter + section layout when scaffolding. `CHANGELOG.md` is a **navigation index** (header + link + summary per version), regenerated by `bun run changelog:build` — devcheck hard-fails on drift; never hand-edit it.
 
 Each per-version file opens with YAML frontmatter:
 
@@ -395,7 +351,7 @@ security: false                            # optional — true ONLY for a source
 
 `breaking: true` renders a `· ⚠️ Breaking` badge — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames). `security: true` renders a `· 🛡️ Security` badge and pairs with a `## Security` body section — set it only for a security fix in this server's *own source code*, never for a routine dependency or transitive CVE bump (record those under `## Dependencies`). When both are set, badges render `· ⚠️ Breaking · 🛡️ Security`.
 
-`agent-notes` is an optional free-form field for maintenance agents processing the release downstream. Content here won't appear in the rendered CHANGELOG — it's consumed by agents running the `maintenance` skill. Use it for adoption instructions that don't fit the human-facing sections: new files to create, fields to populate, one-time migration steps. Omit entirely when there's nothing to say.
+`agent-notes` is an optional free-form field for maintenance agents processing the release downstream. Content here won't appear in the rendered CHANGELOG — it's consumed by agents running the `maintenance` skill. Omit entirely when there's nothing to say.
 
 **Section order:** the Keep a Changelog sequence — Added, Changed, Deprecated, Removed, Fixed, Security — then `Dependencies` last. Include only sections with entries — don't ship empty headers.
 
@@ -414,28 +370,27 @@ security: false                            # optional — true ONLY for a source
 ```ts
 // Framework — z is re-exported, no separate zod import needed
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 // Server's own code — via path alias
-import { getMyService } from '@/services/my-domain/my-service.js';
+import { getGrantsGovService } from '@/services/grants-gov/grants-gov-service.js';
 ```
 
 ---
 
 ## Checklist
 
-- [ ] Zod schemas: all fields have `.describe()`, only JSON-Schema-serializable types (no `z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`, `z.function()`, `z.nan()`)
-- [ ] Optional nested objects: handler guards for empty inner values from form-based clients (`if (input.obj?.field && ...)`, not just `if (input.obj)`). When regex/length constraints matter, use `z.union([z.literal(''), z.string().regex(...).describe(...)])` — literal variants are exempt from `describe-on-fields`.
+- [ ] Zod schemas: all fields have `.describe()`, only JSON-Schema-serializable types (no `z.custom()`, `z.date()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`, `z.function()`, `z.nan()`)
+- [ ] Optional inputs use `optionalText` / `optionalList`; pattern inputs use `normalizedString` with a `rawPattern` that admits every spelling the `.describe()` promises
 - [ ] JSDoc `@fileoverview` + `@module` on every file
-- [ ] `ctx.log` for logging, `ctx.state` for storage
-- [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
-- [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
-- [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
-- [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
-- [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
-- [ ] Registered in `createApp()` arrays (directly or via barrel exports)
+- [ ] `ctx.log` for logging; process-wide caches stay in the service, tenant data in `ctx.state`
+- [ ] Handlers throw on failure via `ctx.fail` with a declared reason — no try/catch; service-thrown reasons declared with `thrownBy: 'service'`
+- [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Agency text goes through `inline` / `tableCell` / `blockquote`
+- [ ] New upstream field or filter: probed against the live API first, added to the closed `Search2Body` / raw types as optional, and recorded in `docs/design.md`
+- [ ] Normalization and `format()` preserve uncertainty; missing upstream values stay absent, never fabricated (a listed `0` stays `0`)
+- [ ] Tests include at least one sparse payload case with omitted upstream fields
+- [ ] Keyword grammar changes reflected in `keyword.ts`, the search tool's `keyword` description, and the `keyword_syntax` reference entries
+- [ ] Registered in `allToolDefinitions` (`src/mcp-server/tools/definitions/index.ts`)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
-- [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
-- [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
-- [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
-- [ ] `npm run devcheck` passes
+- [ ] `.codex-plugin/plugin.json`, `.claude-plugin/plugin.json`, `.codex-plugin/mcp.json`, `manifest.json`, and `server.json` in sync with `package.json` (name unscoped on display fields, `npx -y @cyanheads/grantsgov-mcp-server` install arg, version, description); an added env var goes into every one of them
+- [ ] `bun run devcheck` passes

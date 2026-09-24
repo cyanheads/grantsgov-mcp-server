@@ -1,7 +1,7 @@
 {
   "name": "grantsgov-mcp-server",
   "version": "0.1.0",
-  "description": "Search US federal grant opportunities on Grants.gov and read full opportunity detail — eligibility, award range, deadlines, attachments. Keyless. STDIO or Streamable HTTP.",
+  "description": "Search Grants.gov funding opportunities and read full records: eligibility, awards, deadlines.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -10,12 +10,12 @@
   "homepage": "https://github.com/cyanheads/grantsgov-mcp-server#readme",
   "repository": "https://github.com/cyanheads/grantsgov-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "grants", "grants-gov", "federal-grants"],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "grants", "grants-gov", "federal-grants", "federal-funding"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "grantsgov-mcp-server",
-    "shortDescription": "Search US federal grant opportunities on Grants.gov, keyless.",
-    "longDescription": "Search US federal grant opportunities on Grants.gov and read full opportunity detail — eligibility, award range, deadlines, attachments. Keyless. STDIO or Streamable HTTP.",
+    "shortDescription": "Search Grants.gov funding opportunities and read full records: eligibility, awards, deadlines.",
+    "longDescription": "Search Grants.gov federal funding opportunities, read full records (eligibility, awards, deadlines, attachments), and decode filter codes via MCP. STDIO or Streamable HTTP.",
     "developerName": "cyanheads",
     "category": "research",
     "capabilities": ["Read"],
