@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/grantsgov-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpName": "io.github.cyanheads/grantsgov-mcp-server",
   "description": "Search Grants.gov federal funding opportunities, read full records (eligibility, awards, deadlines, attachments), and decode filter codes via MCP. STDIO or Streamable HTTP.",
   "type": "module",

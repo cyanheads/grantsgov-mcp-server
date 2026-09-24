@@ -1,6 +1,6 @@
 # grantsgov-mcp-server - Directory Structure
 
-Generated on: 2026-09-24 07:57:01
+Generated on: 2026-09-24 08:05:29
 
 ```text
 grantsgov-mcp-server/
@@ -24,6 +24,7 @@ grantsgov-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -182,6 +183,7 @@ grantsgov-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
