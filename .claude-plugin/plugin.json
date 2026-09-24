@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "grantsgov-mcp-server",
+  "version": "0.1.0",
+  "description": "Search US federal grant opportunities on Grants.gov and read full opportunity detail — eligibility, award range, deadlines, attachments. Keyless. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/grantsgov-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/grantsgov-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "grants", "grants-gov", "federal-grants"],
+  "mcpServers": {
+    "grantsgov-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/grantsgov-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}
