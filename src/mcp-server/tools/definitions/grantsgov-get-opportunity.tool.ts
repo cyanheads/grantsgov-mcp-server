@@ -8,7 +8,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getGrantsGovService } from '@/services/grants-gov/grants-gov-service.js';
+import {
+  getGrantsGovService,
+  STATUSES,
+  type Status,
+} from '@/services/grants-gov/grants-gov-service.js';
 import { htmlToText } from '@/services/grants-gov/html-to-text.js';
 import {
   closeDateKind,
@@ -30,9 +34,6 @@ import type {
 } from '@/services/grants-gov/types.js';
 import { OPPORTUNITY_NUMBER_INPUT, optionalList } from '../input-schemas.js';
 import { blockquote, inline, tableCell } from '../render.js';
-
-const STATUSES = ['forecasted', 'posted', 'closed', 'archived'] as const;
-type Status = (typeof STATUSES)[number];
 
 const MAX_IDENTIFIERS = 5;
 const DESCRIPTION_CAP = 12_000;
@@ -340,13 +341,24 @@ const Candidate = z
   })
   .describe('One opportunity carrying the ambiguous number.');
 
-type Unresolved = {
-  candidates?: z.infer<typeof Candidate>[];
-  guidance: string;
-  input: string;
-  input_kind: 'opportunity_id' | 'opportunity_number';
-  outcome: 'not_found' | 'ambiguous';
-};
+const UnresolvedEntry = z
+  .object({
+    input: z.string().describe('The id or number as given.'),
+    input_kind: z
+      .enum(['opportunity_id', 'opportunity_number'])
+      .describe('Which list it came from.'),
+    outcome: z
+      .enum(['not_found', 'ambiguous'])
+      .describe('not_found = no record; ambiguous = the number matches more than one opportunity.'),
+    candidates: z
+      .array(Candidate)
+      .optional()
+      .describe('For ambiguous numbers: every match, to re-request by id.'),
+    guidance: z.string().describe('The next call to make.'),
+  })
+  .describe('One input that did not resolve to exactly one record.');
+
+type Unresolved = z.infer<typeof UnresolvedEntry>;
 
 /** Normalized agency text, or `undefined` when blank or the literal `"undefined"` some records carry. */
 function text(raw: string | null | undefined): string | undefined {
@@ -378,10 +390,10 @@ function codeLabels(entries: readonly RawCodeDescription[] | null | undefined) {
 }
 
 /** Maps a raw detail record, reading block-scoped fields from the block named by `docType`. */
-function toRecord(raw: RawDetail, today: string): OpportunityRecordValue {
+function toRecord(raw: RawDetail & { id: number }, today: string): OpportunityRecordValue {
   const isForecast = raw.docType?.toLowerCase() === 'forecast';
   const block = (isForecast ? raw.forecast : raw.synopsis) ?? {};
-  const id = raw.id as number;
+  const { id } = raw;
 
   const closeDate = parseStrDate(
     isForecast ? block.estApplicationResponseDateStr : block.responseDateStr,
@@ -418,14 +430,16 @@ function toRecord(raw: RawDetail, today: string): OpportunityRecordValue {
       )
     : {};
 
+  const contactName = plain(block.agencyContactName);
   const contactEmail = plain(block.agencyContactEmail);
+  const contactPhone = plain(block.agencyContactPhone);
   const emailLabel = text(block.agencyContactEmailDesc);
   const contactDetails =
     text(block.agencyContactDesc) ?? (emailLabel !== contactEmail ? emailLabel : undefined);
   const contact = {
-    ...(plain(block.agencyContactName) && { name: plain(block.agencyContactName) as string }),
+    ...(contactName && { name: contactName }),
     ...(contactEmail && { email: contactEmail }),
-    ...(plain(block.agencyContactPhone) && { phone: plain(block.agencyContactPhone) as string }),
+    ...(contactPhone && { phone: contactPhone }),
     ...(contactDetails && { details: contactDetails }),
   };
 
@@ -598,7 +612,7 @@ function renderRecord(record: OpportunityRecordValue): string[] {
     [name && inline(name), code && `\`${inline(code)}\``].filter(Boolean).join(' ') || 'Not listed';
   lines.push(
     `**Opportunity number:** \`${inline(record.opportunity_number)}\` · **ID:** ${record.opportunity_id} · **Status:** ${record.status} (${record.doc_type})`,
-    `**Category:** ${record.category_code !== undefined || record.category_label !== undefined ? [record.category_code, record.category_label && inline(record.category_label)].filter(Boolean).join(' ') : 'Not listed'}`,
+    `**Category:** ${[record.category_code, record.category_label && inline(record.category_label)].filter(Boolean).join(' ') || 'Not listed'}`,
     `**Agency:** ${agency(record.agency_name, record.agency_code)}${record.top_agency_code !== undefined || record.top_agency_name !== undefined ? ` · **Top-level agency:** ${agency(record.top_agency_name, record.top_agency_code)}` : ''}`,
     `**Grants.gov page:** ${record.grants_gov_url}`,
     '',
@@ -791,26 +805,7 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
   output: z.object({
     opportunities: z.array(OpportunityRecord).describe('Records found, in input order.'),
     unresolved: z
-      .array(
-        z
-          .object({
-            input: z.string().describe('The id or number as given.'),
-            input_kind: z
-              .enum(['opportunity_id', 'opportunity_number'])
-              .describe('Which list it came from.'),
-            outcome: z
-              .enum(['not_found', 'ambiguous'])
-              .describe(
-                'not_found = no record; ambiguous = the number matches more than one opportunity.',
-              ),
-            candidates: z
-              .array(Candidate)
-              .optional()
-              .describe('For ambiguous numbers: every match, to re-request by id.'),
-            guidance: z.string().describe('The next call to make.'),
-          })
-          .describe('One input that did not resolve to exactly one record.'),
-      )
+      .array(UnresolvedEntry)
       .describe('Inputs that did not resolve to exactly one record. Empty when all resolved.'),
   }),
 

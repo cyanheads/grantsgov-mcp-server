@@ -125,10 +125,7 @@ export function parseCount(raw: unknown): number | undefined {
  * {@link PLACEHOLDER_YEARS_OUT} past today's ET year (the `01/01/2099` sentinel,
  * NSF "accepted anytime" dates) → `placeholder`; anything else → `fixed`.
  */
-export function closeDateKind(
-  closeIso: string | undefined,
-  today: string = todayET(),
-): CloseDateKind {
+export function closeDateKind(closeIso: string | undefined, today: string): CloseDateKind {
   if (!closeIso) return 'none_listed';
   return Number(closeIso.slice(0, 4)) >= Number(today.slice(0, 4)) + PLACEHOLDER_YEARS_OUT
     ? 'placeholder'

@@ -18,7 +18,7 @@ import {
   getEnrichment,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { grantsgovGetOpportunity } from '@/mcp-server/tools/definitions/grantsgov-get-opportunity.tool.js';
 import {
   ALL_STATUSES,
@@ -46,6 +46,7 @@ import {
   DETAIL_FORECAST,
   DETAIL_NSF,
 } from '../../../fixtures/grants-gov-records.js';
+import { drained, rejectionOf } from '../../../fixtures/harness.js';
 
 const tool = grantsgovGetOpportunity;
 type Input = Parameters<typeof tool.input.parse>[0];
@@ -67,7 +68,6 @@ beforeEach(() => {
 afterEach(() => {
   getGrantsGovService().dispose();
   http.restore();
-  vi.useRealTimers();
 });
 
 /** Serves `fetchOpportunity` by id; an id missing from `records` gets the 200 not-found skeleton. */
@@ -115,25 +115,13 @@ async function recordOf(raw: { id: number } & Record<string, unknown>): Promise<
   return record;
 }
 
-type Failure = { code: number; message: string; data: Record<string, unknown> };
+const failure = (raw: Input) =>
+  rejectionOf(() =>
+    tool.handler(tool.input.parse(raw), createMockContext({ errors: tool.errors })),
+  );
 
-async function failure(raw: Input): Promise<Failure> {
-  const ctx = createMockContext({ errors: tool.errors });
-  try {
-    await tool.handler(tool.input.parse(raw), ctx);
-  } catch (err) {
-    return err as Failure;
-  }
-  throw new Error('Expected the handler to throw');
-}
-
-/** {@link failure} with `setTimeout` faked, so retry backoff drains instantly. */
-async function drainedFailure(raw: Input): Promise<Failure> {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-  const pending = failure(raw);
-  await vi.runAllTimersAsync();
-  return await pending;
-}
+/** {@link failure} with retry backoff drained. */
+const drainedFailure = (raw: Input) => drained(() => failure(raw));
 
 const today = todayET();
 const numberNotFoundGuidance = (number: string) =>

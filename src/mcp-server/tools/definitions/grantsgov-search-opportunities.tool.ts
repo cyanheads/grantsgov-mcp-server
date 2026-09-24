@@ -14,6 +14,8 @@ import {
   isSameOpportunityNumber,
   quoteOppNum,
   SCAN_CEILING,
+  STATUSES,
+  type Status,
 } from '@/services/grants-gov/grants-gov-service.js';
 import { compileKeyword } from '@/services/grants-gov/keyword.js';
 import {
@@ -44,8 +46,6 @@ import {
 } from '../input-schemas.js';
 import { inline, tableCell } from '../render.js';
 
-const STATUSES = ['forecasted', 'posted', 'closed', 'archived'] as const;
-type Status = (typeof STATUSES)[number];
 const DEFAULT_STATUSES: readonly Status[] = ['forecasted', 'posted'];
 
 const SORTS = [
@@ -295,26 +295,6 @@ function statusCount(facets: RawFacets, status: Status): number {
     facets.oppStatusOptions?.find((option) => option.value?.trim().toLowerCase() === status)
       ?.count ?? 0
   );
-}
-
-/**
- * Runs a number-scoped lookup as given; on no exact match with lowercase letters
- * present, retries once uppercased (the upstream match is case-sensitive).
- */
-async function withUppercaseRetry<T>(
-  opportunityNumber: string | undefined,
-  run: (sent: string | undefined) => Promise<T>,
-  exactMatches: (result: T) => number,
-): Promise<T> {
-  const first = await run(opportunityNumber);
-  if (
-    opportunityNumber === undefined ||
-    exactMatches(first) > 0 ||
-    !/[a-z]/.test(opportunityNumber)
-  ) {
-    return first;
-  }
-  return await run(opportunityNumber.toUpperCase());
 }
 
 /** `['a']` → `a`; `['a', 'b']` → `a and b`; `['a', 'b', 'c']` → `a, b, and c`. */
@@ -686,14 +666,35 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         dateRange: String(input.posted_within_days),
       }),
     };
-    const withNumber = (sent: string | undefined): Search2Body =>
-      sent === undefined ? filters : { ...filters, oppNum: quoteOppNum(sent) };
-    const exact = (hits: readonly RawHit[]) =>
-      oppNum === undefined
-        ? [...hits]
-        : hits.filter((hit) => isSameOpportunityNumber(hit.number, oppNum));
     const sortBy = SORT_BY[sort];
     const page = (hits: readonly RawHit[]) => hits.slice(input.offset, input.offset + input.limit);
+
+    /**
+     * One local page for an opportunity number, kept to exact matches. Sent quoted
+     * as given; on no exact match with lowercase letters present, retried once
+     * uppercased (the upstream match is case-sensitive).
+     */
+    const searchNumber = async (number: string) => {
+      const exact = (hits: readonly RawHit[]) =>
+        hits.filter((hit) => isSameOpportunityNumber(hit.number, number));
+      const lookup = (sent: string) =>
+        service.search(
+          {
+            ...filters,
+            oppNum: quoteOppNum(sent),
+            oppStatuses: statuses.join('|'),
+            ...(sortBy !== undefined && { sortBy }),
+            rows: NUMBER_MODE_ROWS,
+            startRecordNum: 0,
+          },
+          ctx,
+        );
+      let result = await lookup(number);
+      if (exact(result.hits).length === 0 && /[a-z]/.test(number)) {
+        result = await lookup(number.toUpperCase());
+      }
+      return { matches: exact(result.hits), facets: result.facets };
+    };
 
     let hits: RawHit[];
     let total: number;
@@ -712,26 +713,11 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
          * page is cut locally over exact matches only: the window, the next close
          * after it, and the posted count all exclude non-equal upstream hits.
          */
-        const result = await withUppercaseRetry(
-          oppNum,
-          (sent) =>
-            service.search(
-              {
-                ...withNumber(sent),
-                oppStatuses: 'posted',
-                sortBy: 'closeDate|asc',
-                rows: NUMBER_MODE_ROWS,
-                startRecordNum: 0,
-              },
-              ctx,
-            ),
-          (response) => exact(response.hits).length,
-        );
-        const posted = exact(result.hits);
+        const posted = await searchNumber(oppNum);
         scan = {
-          ...cutClosingWindow(posted, today, cutoff),
-          postedTotal: posted.length,
-          facets: result.facets,
+          ...cutClosingWindow(posted.matches, today, cutoff),
+          postedTotal: posted.matches.length,
+          facets: posted.facets,
           ceilingHit: false,
         };
       }
@@ -743,25 +729,10 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         primaryNotice = emptyWindowNotice(scan, closingDays, today);
       }
     } else if (oppNum !== undefined) {
-      const result = await withUppercaseRetry(
-        oppNum,
-        (sent) =>
-          service.search(
-            {
-              ...withNumber(sent),
-              oppStatuses: statuses.join('|'),
-              ...(sortBy !== undefined && { sortBy }),
-              rows: NUMBER_MODE_ROWS,
-              startRecordNum: 0,
-            },
-            ctx,
-          ),
-        (response) => exact(response.hits).length,
-      );
-      const matches = exact(result.hits);
-      total = matches.length;
-      hits = page(matches);
-      facets = result.facets;
+      const numbered = await searchNumber(oppNum);
+      total = numbered.matches.length;
+      hits = page(numbered.matches);
+      facets = numbered.facets;
     } else {
       const result = await service.search(
         {
@@ -849,17 +820,13 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
     const nextOffset = input.offset + opportunities.length;
     const more = opportunities.length > 0 && nextOffset < total;
     if (more) fragments.push(`More results: call again with offset ${nextOffset}.`);
-    const notice = fragments.length > 0 ? fragments.join(' ') : undefined;
+    const notice = fragments.join(' ');
 
     ctx.enrich({ totalCount: total, shown: opportunities.length });
     if (more) {
       ctx.enrich({ next_offset: nextOffset });
-      ctx.enrich.truncated({
-        shown: opportunities.length,
-        cap: input.limit,
-        ...(notice !== undefined && { guidance: notice }),
-      });
-    } else if (notice !== undefined) {
+      ctx.enrich.truncated({ shown: opportunities.length, cap: input.limit, guidance: notice });
+    } else if (notice) {
       ctx.enrich.notice(notice);
     }
 
@@ -905,14 +872,12 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
               ? `${row.close_date} (placeholder date: open-ended)`
               : (row.close_date ?? '');
         const agency =
-          row.agency_name !== undefined || row.agency_code !== undefined
-            ? [
-                row.agency_name !== undefined ? tableCell(row.agency_name) : undefined,
-                row.agency_code !== undefined ? `\`${tableCell(row.agency_code)}\`` : undefined,
-              ]
-                .filter(Boolean)
-                .join(' ')
-            : 'Not listed';
+          [
+            row.agency_name !== undefined && tableCell(row.agency_name),
+            row.agency_code !== undefined && `\`${tableCell(row.agency_code)}\``,
+          ]
+            .filter(Boolean)
+            .join(' ') || 'Not listed';
         lines.push(
           `| ${closes} | ${row.days_until_close ?? '—'} | ${tableCell(row.title)} | \`${tableCell(row.opportunity_number)}\` | ${row.opportunity_id} | ${agency} | ${row.status} (${row.doc_type}) | ${row.open_date ?? 'not listed'} | ${row.assistance_listings.map(tableCell).join(', ') || 'none'} |`,
         );

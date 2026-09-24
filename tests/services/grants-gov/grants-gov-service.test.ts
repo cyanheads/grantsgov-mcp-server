@@ -37,6 +37,7 @@ import {
   SEARCH2_URL,
   searchData,
 } from '../../fixtures/grants-gov.js';
+import { drained, rejectionOf } from '../../fixtures/harness.js';
 
 const ctxFor = (options: { signal?: AbortSignal } = {}) =>
   createMockContext({ errors: grantsgovListReference.errors, ...options });
@@ -62,34 +63,9 @@ const route = (
   once = false,
 ) => http.route({ method: 'POST', match, respond, ...(once && { once }) });
 
-/**
- * Runs `call` with `setTimeout` faked, so the retry ladder's backoff sleeps
- * drain instantly instead of taking ~1.5 s of wall time per exhausted call.
- */
-async function drained<T>(call: () => Promise<T>): Promise<T> {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-  try {
-    const outcome = call().then(
-      (value) => ({ ok: true as const, value }),
-      (error: unknown) => ({ ok: false as const, error }),
-    );
-    await vi.runAllTimersAsync();
-    const settled = await outcome;
-    if (!settled.ok) throw settled.error;
-    return settled.value;
-  } finally {
-    vi.useRealTimers();
-  }
-}
-
-/** Runs `call` to its rejection and returns it as an McpError. */
+/** Runs `call` to its rejection, retry backoff drained, and returns it as an McpError. */
 async function rejection(call: () => Promise<unknown>): Promise<McpError> {
-  const error = await drained(call).then(
-    () => {
-      throw new Error('Expected the call to reject');
-    },
-    (err: unknown) => err,
-  );
+  const error: unknown = await drained(() => rejectionOf(call));
   expect(error).toBeInstanceOf(McpError);
   return error as McpError;
 }

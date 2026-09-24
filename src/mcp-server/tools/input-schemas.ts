@@ -80,7 +80,7 @@ export const AGENCY_CODE_INPUT = normalizedString(
 );
 
 /** Trims, then removes one pair of double quotes around the whole value and trims again. */
-export const unquoteOpportunityNumber = (value: string): string => {
+const unquoteOpportunityNumber = (value: string): string => {
   const trimmed = value.trim();
   return trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')
     ? trimmed.slice(1, -1).trim()

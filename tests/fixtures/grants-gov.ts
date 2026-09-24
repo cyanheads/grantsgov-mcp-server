@@ -349,18 +349,17 @@ export const FACETS_OPEN: RawFacets = {
 };
 
 /**
- * Routes `search2` facets-only calls to the snapshot fixtures: a body with
+ * Answers a `search2` facets-only call from the snapshot fixtures: a body with
  * `oppStatuses` gets {@link FACETS_ALL}, a bare `{ rows: 0 }` gets {@link FACETS_OPEN}.
  */
+export const referenceResponse = (body: Search2Body): Response =>
+  body.oppStatuses ? ok(searchData([], 83451, FACETS_ALL)) : ok(searchData([], 1531, FACETS_OPEN));
+
+/** Routes every `search2` call to {@link referenceResponse}. */
 export const referenceRoute = (): FetchMockRoute => ({
   method: 'POST',
   match: SEARCH2_URL,
-  respond: async (request) => {
-    const body = await bodyOf(request);
-    return body.oppStatuses
-      ? ok(searchData([], 83451, FACETS_ALL))
-      : ok(searchData([], 1531, FACETS_OPEN));
-  },
+  respond: async (request) => referenceResponse(await bodyOf(request)),
 });
 
 /** `fetchOpportunity` for an unknown id: a 200 skeleton with `errorMessages`. */

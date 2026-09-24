@@ -192,8 +192,10 @@ export type NumberResolution =
   | { kind: 'ambiguous'; candidates: RawHit[] }
   | { kind: 'not_found' };
 
-/** `fetchOpportunity()` result. A miss is a result, never thrown. */
-export type FetchResult = { kind: 'found'; record: RawDetail } | { kind: 'not_found' };
+/** `fetchOpportunity()` result. A miss is a result, never thrown; a found record always has its numeric id. */
+export type FetchResult =
+  | { kind: 'found'; record: RawDetail & { id: number } }
+  | { kind: 'not_found' };
 
 /** A reference vocabulary entry with its opportunity counts. */
 export interface ReferenceCode {

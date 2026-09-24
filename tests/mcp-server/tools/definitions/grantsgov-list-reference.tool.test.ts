@@ -14,13 +14,14 @@ import {
   getEnrichment,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { grantsgovListReference } from '@/mcp-server/tools/definitions/grantsgov-list-reference.tool.js';
 import {
   getGrantsGovService,
   initGrantsGovService,
 } from '@/services/grants-gov/grants-gov-service.js';
 import { json, referenceRoute, SEARCH2_URL } from '../../../fixtures/grants-gov.js';
+import { drained, rejectionOf } from '../../../fixtures/harness.js';
 
 const tool = grantsgovListReference;
 type Input = Parameters<typeof tool.input.parse>[0];
@@ -45,15 +46,10 @@ async function run(raw: Input) {
   return { result, enrichment: getEnrichment(ctx) };
 }
 
-async function failure(raw: Input) {
-  const ctx = createMockContext({ errors: tool.errors });
-  try {
-    await tool.handler(tool.input.parse(raw), ctx);
-  } catch (err) {
-    return err as { code: number; message: string; data: Record<string, unknown> };
-  }
-  throw new Error('Expected the handler to throw');
-}
+const failure = (raw: Input) =>
+  rejectionOf(() =>
+    tool.handler(tool.input.parse(raw), createMockContext({ errors: tool.errors })),
+  );
 
 const codes = (entries: { code: string }[]) => entries.map((entry) => entry.code);
 
@@ -326,22 +322,15 @@ describe('error contract', () => {
       match: SEARCH2_URL,
       respond: json({ message: 'Internal server error' }, 502),
     });
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    try {
-      const pending = failure({ topic: 'funding_categories' });
-      await vi.runAllTimersAsync();
-      const error = await pending;
-      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect(error.data).toMatchObject({
-        reason: 'upstream_unavailable',
-        retryAttempts: 3,
-        recovery: {
-          hint: 'Grants.gov is not responding; wait a minute and call grantsgov_list_reference again.',
-        },
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+    const error = await drained(() => failure({ topic: 'funding_categories' }));
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({
+      reason: 'upstream_unavailable',
+      retryAttempts: 3,
+      recovery: {
+        hint: 'Grants.gov is not responding; wait a minute and call grantsgov_list_reference again.',
+      },
+    });
   });
 });
 

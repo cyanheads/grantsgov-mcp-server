@@ -17,7 +17,7 @@ import {
   getEnrichment,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { grantsgovSearchOpportunities } from '@/mcp-server/tools/definitions/grantsgov-search-opportunities.tool.js';
 import {
   getGrantsGovService,
@@ -36,6 +36,7 @@ import {
   ok,
   POSTED_HITS,
   postedHit,
+  referenceResponse,
   SEARCH2_URL,
   searchData,
 } from '../../../fixtures/grants-gov.js';
@@ -44,6 +45,7 @@ import {
   CDC_FORECAST_HITS,
   NSF_ZERO_HIT_FACETS,
 } from '../../../fixtures/grants-gov-records.js';
+import { drained, rejectionOf } from '../../../fixtures/harness.js';
 
 const tool = grantsgovSearchOpportunities;
 type Input = Parameters<typeof tool.input.parse>[0];
@@ -71,7 +73,6 @@ beforeEach(() => {
 afterEach(() => {
   getGrantsGovService().dispose();
   http.restore();
-  vi.useRealTimers();
 });
 
 /**
@@ -85,12 +86,7 @@ function serve(respond: (body: Search2Body) => Response | Promise<Response>) {
     match: SEARCH2_URL,
     respond: async (request) => {
       const body = await bodyOf(request);
-      if (body.rows === 0) {
-        return body.oppStatuses
-          ? ok(searchData([], 83451, FACETS_ALL))
-          : ok(searchData([], 1531, FACETS_OPEN));
-      }
-      return await respond(body);
+      return body.rows === 0 ? referenceResponse(body) : await respond(body);
     },
   });
 }
@@ -124,25 +120,13 @@ async function run(raw: Input) {
   return { result, enrichment };
 }
 
-type Failure = { code: number; message: string; data: Record<string, unknown> };
+const failure = (raw: Input) =>
+  rejectionOf(() =>
+    tool.handler(tool.input.parse(raw), createMockContext({ errors: tool.errors })),
+  );
 
-async function failure(raw: Input): Promise<Failure> {
-  const ctx = createMockContext({ errors: tool.errors });
-  try {
-    await tool.handler(tool.input.parse(raw), ctx);
-  } catch (err) {
-    return err as Failure;
-  }
-  throw new Error('Expected the handler to throw');
-}
-
-/** {@link failure} with `setTimeout` faked, so retry backoff drains instantly. */
-async function drainedFailure(raw: Input): Promise<Failure> {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-  const pending = failure(raw);
-  await vi.runAllTimersAsync();
-  return await pending;
-}
+/** {@link failure} with retry backoff drained. */
+const drainedFailure = (raw: Input) => drained(() => failure(raw));
 
 const ids = (result: Output) => result.opportunities.map((row) => row.opportunity_id);
 const today = todayET();

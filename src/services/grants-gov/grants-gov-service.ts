@@ -31,8 +31,12 @@ import type {
 
 const BASE_URL = 'https://api.grants.gov/v1/api';
 
+/** The four opportunity lifecycle statuses. */
+export const STATUSES = ['forecasted', 'posted', 'closed', 'archived'] as const;
+export type Status = (typeof STATUSES)[number];
+
 /** Every lifecycle status, pipe-joined as `search2` requires. */
-export const ALL_STATUSES = 'forecasted|posted|closed|archived';
+export const ALL_STATUSES = STATUSES.join('|');
 
 type Endpoint = 'search2' | 'fetchOpportunity';
 
@@ -185,7 +189,8 @@ function parseEnvelope(text: string, endpoint: Endpoint, ctx: Context): Record<s
   return envelope.data;
 }
 
-function toSearchResult(data: Record<string, unknown>, ctx: Context): SearchResult {
+function toSearchResult(text: string, ctx: Context): SearchResult {
+  const data = parseEnvelope(text, 'search2', ctx);
   const {
     hitCount,
     oppHits,
@@ -218,7 +223,7 @@ function toFetchResult(status: number, text: string, ctx: Context): FetchResult 
   }
   if (typeof data.id === 'number') {
     const { opportunityHistoryDetails: _history, ...record } = data;
-    return { kind: 'found', record: record as RawDetail };
+    return { kind: 'found', record: { ...(record as RawDetail), id: data.id } };
   }
   const messages = Array.isArray(data.errorMessages) ? data.errorMessages : [];
   if (messages.some((m) => typeof m === 'string' && /no record found/i.test(m)))
@@ -239,12 +244,7 @@ export class GrantsGovService {
 
   /** One `search2` call. */
   search(body: Search2Body, ctx: Context): Promise<SearchResult> {
-    return this.post(
-      'search2',
-      body,
-      (_status, text) => toSearchResult(parseEnvelope(text, 'search2', ctx), ctx),
-      ctx,
-    );
+    return this.post('search2', body, (_status, text) => toSearchResult(text, ctx), ctx);
   }
 
   /** One `fetchOpportunity` call, revision history stripped. A miss is `not_found`, never thrown. */
@@ -378,15 +378,9 @@ export class GrantsGovService {
    */
   private async buildReference(ctx: Context): Promise<ReferenceSnapshot> {
     const facetsOnly = (body: Search2Body) =>
-      this.post(
-        'search2',
-        body,
-        (_status, text) => toSearchResult(parseEnvelope(text, 'search2', ctx), ctx),
-        ctx,
-        {
-          detached: true,
-        },
-      );
+      this.post('search2', body, (_status, text) => toSearchResult(text, ctx), ctx, {
+        detached: true,
+      });
     const [all, open] = await Promise.all([
       facetsOnly({ rows: 0, oppStatuses: ALL_STATUSES }),
       facetsOnly({ rows: 0 }),
