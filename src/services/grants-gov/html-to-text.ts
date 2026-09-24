@@ -7,15 +7,47 @@
 
 import { decodeEntities } from './normalize.js';
 
-/** Elements whose content is dropped along with the tags. */
-const DROPPED_CONTENT = /<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+/**
+ * Any start or end tag. The name must start with a letter, so `< $500` stays
+ * text. Attributes stop at the next `<` as well as `>`, so an unclosed `<a` fails
+ * at the next tag instead of rescanning to the end of the text: every scan here
+ * stays linear on agency-authored input.
+ */
+const TAG = /<(\/?)([a-z][a-z0-9]*)\b([^<>]*)>/gi;
 
-const COMMENT = /<!--[\s\S]*?-->/g;
+/**
+ * Removes every span from an `open` match through the next `close` match, left
+ * to right. An `open` with no `close` after it ends the scan, since no later one
+ * can have a `close` either; its text is kept. Both patterns must be global so
+ * `lastIndex` positions them.
+ */
+function removeSpans(source: string, open: RegExp, close: RegExp): string {
+  let out = '';
+  let cursor = 0;
+  for (;;) {
+    open.lastIndex = cursor;
+    const start = open.exec(source);
+    if (!start) break;
+    close.lastIndex = start.index + start[0].length;
+    const end = close.exec(source);
+    if (!end) break;
+    out += source.slice(cursor, start.index);
+    cursor = end.index + end[0].length;
+  }
+  return out + source.slice(cursor);
+}
 
-/** Any start or end tag. The name must start with a letter, so `< $500` stays text. */
-const TAG = /<(\/?)([a-z][a-z0-9]*)\b([^>]*)>/gi;
+/** Removes comments, then `script` and `style` elements with their content. */
+function stripHidden(source: string): string {
+  const withoutComments = removeSpans(source, /<!--/g, /-->/g);
+  const withoutScripts = removeSpans(withoutComments, /<script\b[^<>]*>/gi, /<\/script\s*>/gi);
+  return removeSpans(withoutScripts, /<style\b[^<>]*>/gi, /<\/style\s*>/gi);
+}
 
 const HREF = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
+
+/** Nesting levels a list item's indent reflects; deeper lists indent no further, so output stays linear in input. */
+const MAX_LIST_DEPTH = 6;
 
 interface ListFrame {
   counter: number;
@@ -40,7 +72,7 @@ export function htmlToText(input: string): string {
   let out = '';
   let cursor = 0;
 
-  const source = input.replace(/\r\n?/g, '\n').replace(COMMENT, '').replace(DROPPED_CONTENT, '');
+  const source = stripHidden(input.replace(/\r\n?/g, '\n'));
 
   for (const match of source.matchAll(TAG)) {
     out += source.slice(cursor, match.index);
@@ -65,7 +97,7 @@ export function htmlToText(input: string): string {
       case 'li': {
         if (closing) break;
         const frame = lists.at(-1);
-        const indent = '  '.repeat(Math.max(0, lists.length - 1));
+        const indent = '  '.repeat(Math.max(0, Math.min(lists.length, MAX_LIST_DEPTH) - 1));
         const marker = frame?.ordered ? `${++frame.counter}. ` : '- ';
         out += `\n${indent}${marker}`;
         break;

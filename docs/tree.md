@@ -1,6 +1,6 @@
 # grantsgov-mcp-server - Directory Structure
 
-Generated on: 2026-09-24 07:40:23
+Generated on: 2026-09-24 07:57:01
 
 ```text
 grantsgov-mcp-server/
@@ -154,6 +154,8 @@ grantsgov-mcp-server/
 │   │   ├── grants-gov-records.ts
 │   │   ├── grants-gov.ts
 │   │   └── harness.ts
+│   ├── fuzz/
+│   │   └── tools.fuzz.test.ts
 │   ├── mcp-server/
 │   │   └── tools/
 │   │       ├── definitions/

@@ -44,8 +44,14 @@ export const trimLower = (value: unknown): unknown =>
  * A JSON Schema pattern admitting `core` with surrounding whitespace, or a blank
  * value. No regex flags: `tools/list` carries only the source, so a flag would
  * advertise a narrower pattern than the server enforces.
+ *
+ * The trailing whitespace sits inside the optional group, so a blank value is
+ * matched by the leading `\s*` alone. Written `^\s*(?:core)?\s*$`, both runs
+ * could claim the same whitespace and a failing match would backtrack
+ * quadratically. `core` must start and end with non-whitespace and keep its own
+ * quantified runs disjoint, so a failing match stays linear.
  */
-export const rawPattern = (core: string) => new RegExp(`^\\s*(?:${core})?\\s*$`);
+export const rawPattern = (core: string) => new RegExp(`^\\s*(?:(?:${core})\\s*)?$`);
 
 /**
  * A string input checked in two stages. `tools/list` advertises only the first:
@@ -71,12 +77,16 @@ export const AGENCY_CODE = /^[A-Z0-9](?:[A-Z0-9 -]*[A-Z0-9])?$/;
 export const normalizeAgencyCode = (value: string): string =>
   value.trim().toUpperCase().replace(/\s+/g, ' ');
 
-/** An agency code in any case (`hhs-nih11`), normalized to {@link AGENCY_CODE}. */
+/**
+ * An agency code in any case (`hhs-nih11`), normalized to {@link AGENCY_CODE}.
+ * Capped at 100 characters (real codes are under 30), since an unknown code is
+ * echoed back in the error that names it.
+ */
 export const AGENCY_CODE_INPUT = normalizedString(
-  rawPattern('[A-Za-z0-9](?:[A-Za-z0-9\\s-]*[A-Za-z0-9])?'),
+  rawPattern('[A-Za-z0-9]+(?:[\\s-]+[A-Za-z0-9]+)*'),
   'An agency code is letters, digits, hyphens, and single spaces, e.g. HHS-NIH11.',
   normalizeAgencyCode,
-  z.string().regex(AGENCY_CODE),
+  z.string().max(100, 'An agency code is at most 100 characters.').regex(AGENCY_CODE),
 );
 
 /** Trims, then removes one pair of double quotes around the whole value and trims again. */
@@ -94,7 +104,12 @@ const unquoteOpportunityNumber = (value: string): string => {
  * removed. Internal spaces are kept: numbers with spaces exist.
  */
 export const OPPORTUNITY_NUMBER_INPUT = normalizedString(
-  rawPattern('"[^"]*"|[^"]*'),
+  /**
+   * No double quote at all, or one pair around the whole value. Not built with
+   * `rawPattern`: an unquoted number can hold whitespace, and a trailing `\s*`
+   * after `[^"]*` backtracks cubically on a long run of it.
+   */
+  /^(?:[^"]*|\s*"[^"]*"\s*)$/,
   'An opportunity number cannot contain a double quote; only one pair around the whole number is accepted.',
   unquoteOpportunityNumber,
   z

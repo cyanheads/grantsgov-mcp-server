@@ -91,7 +91,7 @@ Each returns HTTP 200 with a plausible count, so the tool boundary maps the inpu
 
 ### Untrusted text
 
-Agency-authored text (titles, descriptions, eligibility narratives, contact blocks, file names, labels) is data. `html-to-text.ts` normalizes HTML and bare-entity text for both surfaces; `structuredContent` otherwise stays verbatim. In `format()`, use the `render.ts` helpers: `inline()` for text inside a line, `tableCell()` inside a table cell, `blockquote()` for multi-line fields. Never interpolate raw upstream text into `content[]`.
+Agency-authored text (titles, descriptions, eligibility narratives, contact blocks, file names, labels) is data. `html-to-text.ts` normalizes HTML and bare-entity text for both surfaces; `structuredContent` otherwise stays verbatim. In `format()`, use the `render.ts` helpers: `inline()` for text inside a line, `tableCell()` inside a table cell, `blockquote()` for multi-line fields. They split on every line break a renderer may honor (CR, LF, and the Unicode breaks U+000B, U+000C, U+0085, U+2028, U+2029), not just `\n`. Never interpolate raw upstream text into `content[]`, including ids and codes the upstream sends as strings. `html-to-text.ts` scans agency markup in linear time; keep any new pattern there free of a run that can rescan to the end of the text.
 
 ---
 
@@ -103,6 +103,7 @@ Agency-authored text (titles, descriptions, eligibility narratives, contact bloc
 
 - **Blank means unset.** `optionalText(schema)` and `optionalList(item, max)` read `''`, whitespace, and emptied lists as `undefined`. Never `.min(1)` on an optional string.
 - **Advertise the raw form, validate the normalized one.** `normalizedString(raw, message, normalize, normalized)` builds `z.string().regex(raw).transform(normalize).pipe(normalized)`. `tools/list` emits only the first stage, so `raw` (built with `rawPattern()`, no regex flags) must admit every spelling the `.describe()` promises — any case, surrounding whitespace, blank. A `z.preprocess` in front of a pattern would advertise the post-normalization pattern, and a client validating against `tools/list` would reject `hhs`, `7`, or `"363423"` before the server sees them.
+- **Raw patterns fail in linear time.** The raw stage runs on the whole caller string (up to the 1 MiB HTTP body), so a `rawPattern` core starts and ends with non-whitespace and no two adjacent quantified runs may match the same character (`[A-Za-z0-9]+(?:[\s-]+[A-Za-z0-9]+)*`, not `[A-Za-z0-9](?:[A-Za-z0-9\s-]*[A-Za-z0-9])?`). Length caps go in the normalized stage, which `tools/list` does not advertise. `input-schemas.test.ts` times every advertised pattern against 100 KB adversarial strings.
 - Enum inputs keep their canonical `z.enum` behind a `trimLower` / `trimUpper` preprocess; digit-string numbers go through `numberFromDigits`.
 
 ### Tool

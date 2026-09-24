@@ -115,9 +115,13 @@ const normalizeAln = (value: string): string => {
   return /^\d{2}[0-9A-Z]{3}$/.test(bare) ? `${bare.slice(0, 2)}.${bare.slice(2)}` : bare;
 };
 
-/** One assistance listing number in any of its written forms (`93866`, `93.ech`, `ALN 93.866`). */
+/**
+ * One assistance listing number in any of its written forms (`93866`, `93.ech`,
+ * `ALN 93.866`). The label's whitespace lives in one class, so no two runs can
+ * claim the same characters.
+ */
 const ALN_INPUT = normalizedString(
-  rawPattern('(?:[A-Za-z][A-Za-z .]*[:#]?\\s*)?\\d{2}\\.?[0-9A-Za-z]{3}'),
+  rawPattern('(?:[A-Za-z][A-Za-z\\s.]*(?:[:#]\\s*)?)?\\d{2}\\.?[0-9A-Za-z]{3}'),
   'An assistance listing number is two digits, a dot, and three characters, e.g. 93.866.',
   normalizeAln,
   z
@@ -249,7 +253,7 @@ function renderAppliedFilters(applied: Applied): string {
     applied.funding_instruments && `funding instruments ${applied.funding_instruments.join(', ')}`,
     applied.assistance_listing !== undefined && `assistance listing ${applied.assistance_listing}`,
     applied.opportunity_number !== undefined &&
-      `opportunity number \`${applied.opportunity_number}\``,
+      `opportunity number \`${inline(applied.opportunity_number)}\``,
     applied.posted_within_days !== undefined && `posted within ${applied.posted_within_days} days`,
     applied.closing_within_days !== undefined &&
       `closing within ${applied.closing_within_days} days (through ${applied.closing_cutoff_date})`,
@@ -745,7 +749,8 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         ctx,
       );
       total = result.hitCount;
-      hits = result.hits;
+      /** `rows` asks for `limit` rows; the slice keeps a longer upstream page out of the response. */
+      hits = result.hits.slice(0, input.limit);
       facets = result.facets;
     }
 
@@ -879,7 +884,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
             .filter(Boolean)
             .join(' ') || 'Not listed';
         lines.push(
-          `| ${closes} | ${row.days_until_close ?? '—'} | ${tableCell(row.title)} | \`${tableCell(row.opportunity_number)}\` | ${row.opportunity_id} | ${agency} | ${row.status} (${row.doc_type}) | ${row.open_date ?? 'not listed'} | ${row.assistance_listings.map(tableCell).join(', ') || 'none'} |`,
+          `| ${closes} | ${row.days_until_close ?? '—'} | ${tableCell(row.title)} | \`${tableCell(row.opportunity_number)}\` | ${tableCell(row.opportunity_id)} | ${agency} | ${row.status} (${row.doc_type}) | ${row.open_date ?? 'not listed'} | ${row.assistance_listings.map(tableCell).join(', ') || 'none'} |`,
         );
       }
     }

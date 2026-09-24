@@ -116,3 +116,40 @@ describe('htmlToText — plain-text input', () => {
     expect(htmlToText('<p></p>')).toBe('');
   });
 });
+
+describe('htmlToText — malformed and hostile markup', () => {
+  it('keeps the text of an unterminated comment, script, or style', () => {
+    expect(htmlToText('Before <!-- never closed')).toBe('Before <!-- never closed');
+    expect(htmlToText('<!-- a -->Kept<!-- open')).toBe('Kept<!-- open');
+    expect(htmlToText('<script>x')).toBe('x');
+    expect(htmlToText('<style>p{}</style>Text<style>q')).toBe('Textq');
+  });
+
+  it('drops each closed script or style element, in any case', () => {
+    expect(htmlToText('A<SCRIPT type="x">1</SCRIPT >B<script>2</script>C')).toBe('ABC');
+  });
+
+  it('strips a tag that follows an unclosed one', () => {
+    expect(htmlToText('<a <b>bold</b>')).toBe('<a bold');
+  });
+
+  it('caps list indentation, so deep nesting cannot multiply the output', () => {
+    const depth = 2_000;
+    const text = htmlToText(`${'<ul>'.repeat(depth)}<li>deep</li>${'</ul>'.repeat(depth)}`);
+    expect(text).toBe(`${'  '.repeat(5)}- deep`);
+  });
+
+  it.each([
+    ['unclosed tags', '<a'.repeat(50_000)],
+    ['unclosed tags with attributes', '<a href=x '.repeat(10_000)],
+    ['unterminated comments', '<!--'.repeat(25_000)],
+    ['unclosed scripts', '<script>'.repeat(12_500)],
+    ['unclosed styles after a closed one', `<style></style>${'<style>'.repeat(12_500)}`],
+    ['nested lists', `${'<ul>'.repeat(10_000)}${'<li>x'.repeat(10_000)}`],
+  ])('converts 100 KB of %s in linear time', (_name, input) => {
+    const started = performance.now();
+    const text = htmlToText(input);
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(text.length).toBeLessThanOrEqual(input.length * 2);
+  });
+});

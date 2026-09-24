@@ -172,6 +172,14 @@ describe('plain search mode', () => {
     });
   });
 
+  it('returns at most limit rows when the upstream sends more than it was asked for', async () => {
+    const rows = Array.from({ length: 12 }, (_, i) => postedHit(900 + i, 10));
+    page(rows, 12);
+    const { result, enrichment } = await run({ limit: 5 });
+    expect(result.opportunities).toHaveLength(5);
+    expect(enrichment).toMatchObject({ totalCount: 12, shown: 5, next_offset: 5 });
+  });
+
   it('maps forecast, placeholder, long-running, and sparse rows', async () => {
     const [forecast] = CDC_FORECAST_HITS as [RawHit];
     const placeholderDos: RawHit = {
@@ -1233,6 +1241,24 @@ describe('format', () => {
     expect(text).toContain('- **Statuses:** `posted` posted # Forged (1)');
     const lines = text.split('\n');
     expect(lines.some((line) => line.startsWith('## Injected'))).toBe(false);
+    expect(lines.some((line) => line.startsWith('# Forged'))).toBe(false);
+  });
+
+  it('flattens Unicode line breaks and escapes every upstream cell, the id included', () => {
+    const text = render({
+      opportunities: [
+        row({
+          opportunity_id: '1 | 2\u2028# Forged id',
+          title: 'Title\u2029## Forged title',
+          agency_name: 'Agency\u0085Name \\| split',
+        }),
+      ],
+    });
+    expect(text).toContain(
+      '| Title ## Forged title | `HRSA-27-005` | 1 \\| 2 # Forged id | Agency Name \\\\\\| split `HHS-HRSA` |',
+    );
+    const lines = text.split(/\r\n|[\n\v\f\r\u0085\u2028\u2029]/);
+    expect(lines.some((line) => line.startsWith('## Forged'))).toBe(false);
     expect(lines.some((line) => line.startsWith('# Forged'))).toBe(false);
   });
 

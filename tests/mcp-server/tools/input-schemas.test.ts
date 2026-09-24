@@ -124,8 +124,15 @@ describe('AGENCY_CODE_INPUT', () => {
     expect(schema.parse('')).toBeUndefined();
   });
 
-  it.each([['hhs*'], ['-HHS'], ['HHS-'], ['HHS|DOE'], ['"HHS"']])('rejects %j', (raw) => {
-    expect(() => schema.parse(raw)).toThrow();
+  it.each([['hhs*'], ['-HHS'], ['HHS-'], ['HHS|DOE'], ['"HHS"'], ['A'.repeat(101)]])(
+    'rejects %j',
+    (raw) => {
+      expect(() => schema.parse(raw)).toThrow();
+    },
+  );
+
+  it('accepts a 100-character code, so the cap leaves room for every real one', () => {
+    expect(schema.parse('A'.repeat(100))).toBe('A'.repeat(100));
   });
 });
 
@@ -253,5 +260,119 @@ describe('advertised input schemas admit every raw form the descriptions promise
     expect(grantsgovListReference.input.parse({ topic: ' Agencies ', parent_code: 'hhs' })).toEqual(
       { topic: 'agencies', parent_code: 'HHS' },
     );
+  });
+});
+
+/** Every `pattern` in an advertised JSON Schema, at any depth. */
+function patternsIn(schema: unknown): string[] {
+  if (Array.isArray(schema)) return schema.flatMap(patternsIn);
+  if (typeof schema !== 'object' || schema === null) return [];
+  return Object.entries(schema).flatMap(([key, value]) =>
+    key === 'pattern' && typeof value === 'string' ? [value] : patternsIn(value),
+  );
+}
+
+describe('input patterns fail in linear time', () => {
+  const tools = [grantsgovSearchOpportunities, grantsgovGetOpportunity, grantsgovListReference];
+  const patterns = [...new Set(tools.flatMap((tool) => patternsIn(advertised(tool.input))))];
+  const n = 100_000;
+  /** Long runs one quantifier could split with another, each ending in a character no pattern admits there. */
+  const adversarial = [
+    `${' '.repeat(n)}"`,
+    `a${' '.repeat(n)}!`,
+    `a${' -'.repeat(n / 2)}!`,
+    `A${' .'.repeat(n / 2)}!`,
+    `"${' '.repeat(n)}"x`,
+    `${'9'.repeat(n)}!`,
+  ];
+
+  it('covers every pattern the tools advertise', () => {
+    expect(patterns.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it.each(patterns)('%s', (source) => {
+    const pattern = new RegExp(source);
+    for (const value of adversarial) {
+      const started = performance.now();
+      pattern.test(value);
+      expect(performance.now() - started, JSON.stringify(value.slice(0, 12))).toBeLessThan(250);
+    }
+  });
+
+  it('parses a request of adversarial arguments quickly through the real schemas', () => {
+    const started = performance.now();
+    for (const value of adversarial) {
+      grantsgovSearchOpportunities.input.safeParse({
+        agencies: [value],
+        eligibilities: [value],
+        funding_categories: [value],
+        assistance_listing: value,
+        opportunity_number: value,
+      });
+      grantsgovGetOpportunity.input.safeParse({ opportunity_numbers: [value] });
+      grantsgovListReference.input.safeParse({ topic: 'agencies', parent_code: value });
+    }
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe('linear patterns accept the same strings as their straightforward spelling', () => {
+  /**
+   * The direct spelling of each raw pattern, whose adjacent whitespace runs
+   * backtrack super-linearly. Compared over short strings from an alphabet that
+   * exercises every class boundary.
+   */
+  const pairs: [string, RegExp, RegExp][] = [
+    [
+      'agency code',
+      /^\s*(?:[A-Za-z0-9](?:[A-Za-z0-9\s-]*[A-Za-z0-9])?)?\s*$/,
+      rawPattern('[A-Za-z0-9]+(?:[\\s-]+[A-Za-z0-9]+)*'),
+    ],
+    [
+      'opportunity number',
+      /^\s*(?:"[^"]*"|[^"]*)?\s*$/,
+      new RegExp(
+        (advertised(grantsgovGetOpportunity.input).properties.opportunity_numbers?.items
+          ?.pattern as string) ?? '',
+      ),
+    ],
+    ['eligibility', /^\s*(?:\d{1,2})?\s*$/, rawPattern('\\d{1,2}')],
+  ];
+  const alphabet = ['a', 'Z', '9', ' ', '\t', '-', '"', '.', ':', '*'];
+
+  /** Every string over `alphabet` up to `max` characters. */
+  function* strings(max: number, prefix = ''): Generator<string> {
+    yield prefix;
+    if (prefix.length === max) return;
+    for (const ch of alphabet) yield* strings(max, prefix + ch);
+  }
+
+  it.each(pairs)('%s', (_name, direct, linear) => {
+    for (const value of strings(5)) {
+      expect(linear.test(value), JSON.stringify(value)).toBe(direct.test(value));
+    }
+  });
+
+  it('assistance listing admits everything its direct spelling does', () => {
+    const direct = /^\s*(?:(?:[A-Za-z][A-Za-z .]*[:#]?\s*)?\d{2}\.?[0-9A-Za-z]{3})?\s*$/;
+    const linear = new RegExp(
+      advertised(grantsgovSearchOpportunities.input).properties.assistance_listing?.pattern ?? '',
+    );
+    for (const value of [
+      '93.866',
+      ' 93866 ',
+      'ALN 93.866',
+      'CFDA: 93866',
+      'aln no. 93.ech',
+      'CFDA#93866',
+      'ALN\t93866',
+      '',
+    ]) {
+      expect(direct.test(value), value).toBe(true);
+      expect(linear.test(value), value).toBe(true);
+    }
+    for (const value of ['93.866|47.076', '9.866', 'ALN', '93.86']) {
+      expect(linear.test(value), value).toBe(false);
+    }
   });
 });

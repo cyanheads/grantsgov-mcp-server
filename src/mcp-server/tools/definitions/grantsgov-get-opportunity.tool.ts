@@ -612,7 +612,7 @@ function renderRecord(record: OpportunityRecordValue): string[] {
     [name && inline(name), code && `\`${inline(code)}\``].filter(Boolean).join(' ') || 'Not listed';
   lines.push(
     `**Opportunity number:** \`${inline(record.opportunity_number)}\` · **ID:** ${record.opportunity_id} · **Status:** ${record.status} (${record.doc_type})`,
-    `**Category:** ${[record.category_code, record.category_label && inline(record.category_label)].filter(Boolean).join(' ') || 'Not listed'}`,
+    `**Category:** ${[record.category_code && inline(record.category_code), record.category_label && inline(record.category_label)].filter(Boolean).join(' ') || 'Not listed'}`,
     `**Agency:** ${agency(record.agency_name, record.agency_code)}${record.top_agency_code !== undefined || record.top_agency_name !== undefined ? ` · **Top-level agency:** ${agency(record.top_agency_name, record.top_agency_code)}` : ''}`,
     `**Grants.gov page:** ${record.grants_gov_url}`,
     '',
