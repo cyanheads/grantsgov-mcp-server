@@ -1,6 +1,7 @@
 /**
  * @fileoverview Tests for compileKeyword: every row of the design's keyword
- * trap table, the supported pass-through syntax, and each rejection.
+ * trap table, the supported pass-through syntax, each rejection, field-prefix
+ * rejection, and the AND/OR grouping rule.
  * @module tests/services/grants-gov/keyword.test
  */
 
@@ -13,11 +14,13 @@ const compiled = (raw: string) => {
   return result;
 };
 
-const problem = (raw: string) => {
+const rejection = (raw: string) => {
   const result = compileKeyword(raw);
   if (result.ok) throw new Error(`Expected "${raw}" to be rejected, got: ${result.compiled}`);
-  return result.problem;
+  return result;
 };
+
+const problem = (raw: string) => rejection(raw).problem;
 
 describe('compileKeyword — trap table', () => {
   it('ANDs bare adjacent terms (upstream reads them as implicit OR)', () => {
@@ -76,7 +79,7 @@ describe('compileKeyword — trap table', () => {
   });
 
   it.each([
-    ['title:broadband', 'title AND broadband'],
+    ['Healthy Start: rural', 'Healthy AND Start AND rural'],
     ['broadband~', 'broadband'],
     ['[a TO z]', 'a AND TO AND z'],
     ['rural^2', 'rural AND 2'],
@@ -188,4 +191,119 @@ describe('compileKeyword — rejections', () => {
       );
     },
   );
+});
+
+describe('compileKeyword — field prefixes', () => {
+  it.each([
+    [
+      'agency:NSF',
+      'agency:NSF',
+      'Drop "agency:" and pass NSF in the agencies filter (codes from grantsgov_list_reference topic agencies), or keep NSF as a plain keyword term to match it anywhere in the text.',
+    ],
+    [
+      'cfda:93.866',
+      'cfda:93.866',
+      'Drop "cfda:" and pass 93.866 in the assistance_listing filter, or keep 93.866 as a plain keyword term to match it anywhere in the text.',
+    ],
+    [
+      'rural -Agency_Code:HHS',
+      'Agency_Code:HHS',
+      'Drop "Agency_Code:" and pass HHS in the agencies filter (codes from grantsgov_list_reference topic agencies), or keep HHS as a plain keyword term to match it anywhere in the text.',
+    ],
+    [
+      'broadband (oppnum:HRSA-27-005)',
+      'oppnum:HRSA-27-005',
+      'Drop "oppnum:" and pass HRSA-27-005 in the opportunity_number filter, or keep HRSA-27-005 as a plain keyword term to match it anywhere in the text.',
+    ],
+    [
+      'description:opioid',
+      'description:opioid',
+      'Drop "description:" and keep opioid as a plain term; keyword already searches the title, description, opportunity number, and agency.',
+    ],
+    [
+      'title:"rural health" grants',
+      'title:"rural health"',
+      'Drop "title:" and keep "rural health" as a plain term; keyword already searches the title, description, opportunity number, and agency.',
+    ],
+  ])('rejects %j with a hint naming the filter that does the job', (raw, syntax, hint) => {
+    expect(rejection(raw)).toEqual({
+      ok: false,
+      problem: `it uses field syntax (${syntax}), which keyword does not support`,
+      hint,
+    });
+  });
+
+  it.each([
+    ['"COVID-19: Response"', '"COVID-19 Response"'],
+    ['Healthy Start: Eliminating', 'Healthy AND Start AND Eliminating'],
+    ['https://grants.gov', 'https AND "grants.gov"'],
+    ['time 11:59', 'time AND 11 AND 59'],
+  ])('treats a colon that is not a field prefix as text: %j', (raw, expected) => {
+    expect(compiled(raw).compiled).toBe(expected);
+  });
+});
+
+describe('compileKeyword — AND/OR grouping', () => {
+  it.each([
+    [
+      'broadband OR internet rural',
+      'broadband OR internet AND rural',
+      '(broadband OR internet) AND rural',
+      'broadband OR (internet AND rural)',
+    ],
+    [
+      'tribal OR rural broadband',
+      'tribal OR rural AND broadband',
+      '(tribal OR rural) AND broadband',
+      'tribal OR (rural AND broadband)',
+    ],
+    ['a AND b OR c', 'a AND b OR c', 'a AND (b OR c)', '(a AND b) OR c'],
+    [
+      'rural OR tribal -satellite',
+      'rural OR tribal AND -satellite',
+      '(rural OR tribal) AND -satellite',
+      'rural OR (tribal AND -satellite)',
+    ],
+    [
+      'broadband (rural OR tribal health)',
+      'rural OR tribal AND health',
+      '(rural OR tribal) AND health',
+      'rural OR (tribal AND health)',
+    ],
+    [
+      'NOT satellite OR wireless broadband',
+      'NOT satellite OR wireless AND broadband',
+      '(NOT satellite OR wireless) AND broadband',
+      'NOT satellite OR (wireless AND broadband)',
+    ],
+  ])(
+    'rejects the ungrouped mix %j and spells out both groupings',
+    (raw, level, orFirst, andFirst) => {
+      expect(rejection(raw)).toEqual({
+        ok: false,
+        problem: `it mixes AND and OR without parentheses (${level}; bare terms are joined by AND), so which terms are alternatives is ambiguous`,
+        hint: `Add parentheses to say which terms are alternatives, e.g. ${orFirst} or ${andFirst}.`,
+      });
+    },
+  );
+
+  it.each([
+    ['(broadband OR internet) AND rural', '(broadband OR internet) AND rural'],
+    ['broadband OR (internet AND rural)', 'broadband OR (internet AND rural)'],
+    ['(broadband OR internet) rural', '(broadband OR internet) AND rural'],
+    ['broadband OR (internet rural)', 'broadband OR (internet AND rural)'],
+    ['rural OR tribal OR frontier', 'rural OR tribal OR frontier'],
+    ['broadband NOT (satellite OR wireless)', 'broadband AND NOT (satellite OR wireless)'],
+    [
+      '(rural OR tribal) ((health OR clinic) -dental)',
+      '(rural OR tribal) AND ((health OR clinic) AND -dental)',
+    ],
+  ])('accepts a keyword whose every group uses one operator: %j', (raw, expected) => {
+    expect(compiled(raw).compiled).toBe(expected);
+  });
+
+  it('reports andJoined for a grouped keyword that requires every group', () => {
+    expect(compiled('(rural OR tribal) broadband').andJoined).toBe(true);
+    expect(compiled('rural OR (tribal AND broadband)').andJoined).toBe(true);
+  });
 });

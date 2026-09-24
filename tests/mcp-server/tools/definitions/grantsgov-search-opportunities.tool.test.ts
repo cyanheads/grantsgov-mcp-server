@@ -57,6 +57,8 @@ const Effective = tool.output.extend(tool.enrichment);
 const FACET_FRAGMENT =
   'Facet counts describe every posted opportunity matching the other filters, not only those closing in the window.';
 const RERUN = 'Rerun with fewer filters to see facet counts for refining.';
+const ALN_FRAGMENT = (aln: string) =>
+  `assistance_listing is one exact ALN (${aln}); confirm the number (each grantsgov_get_opportunity record lists its assistance_listings), or drop assistance_listing and search the program name as keyword.`;
 
 let http: FetchMockHarness;
 
@@ -258,10 +260,22 @@ describe('plain search mode', () => {
 
   it('normalizes operators, quotes punctuated tokens, and strips unsupported syntax', async () => {
     page([]);
-    const { enrichment } = await run({ keyword: 'COVID-19 and k-12 or tribal? title:x' });
+    const { enrichment } = await run({
+      keyword: '(COVID-19 or k-12) and tribal? Healthy Start: x',
+    });
     const [body] = await pageBodies();
-    expect(body?.keyword).toBe('"COVID-19" AND "k-12" OR tribal AND title AND x');
+    expect(body?.keyword).toBe('("COVID-19" OR "k-12") AND tribal AND Healthy AND Start AND x');
     expect(enrichment.effective_keyword).toBe(body?.keyword);
+  });
+
+  it('sends a grouped AND/OR keyword exactly as grouped', async () => {
+    page([]);
+    await run({ keyword: '(broadband or internet) rural' });
+    await run({ keyword: 'broadband OR (internet rural)' });
+    expect((await pageBodies()).map((body) => body.keyword)).toEqual([
+      '(broadband OR internet) AND rural',
+      'broadband OR (internet AND rural)',
+    ]);
   });
 
   it('honors an explicit sort alongside a keyword', async () => {
@@ -505,10 +519,10 @@ describe('zero-hit notice composition', () => {
       [
         'No opportunities matched these filters.',
         '236 closed and 972 archived opportunities match; add "closed" and/or "archived" to statuses to include them.',
-        'All keyword terms were required (tuberculosis AND tribal); join alternatives with OR, or drop a term.',
+        'All keyword terms were required (tuberculosis AND tribal); join alternatives with OR, in parentheses when other terms stay required, or drop a term.',
         'Set include_unrestricted to true to add opportunities open to any applicant type.',
         'Raise posted_within_days or remove it; it limits results to opportunities posted in the last 7 days.',
-        'Remove one filter at a time, or call grantsgov_list_reference to confirm the codes.',
+        'Remove one filter at a time, or confirm the eligibilities and funding_instruments codes with grantsgov_list_reference.',
         RERUN,
       ].join(' '),
     );
@@ -524,9 +538,33 @@ describe('zero-hit notice composition', () => {
     page([], 0, {});
     const { enrichment } = await run({ assistance_listing: '93.ECH' });
     expect(enrichment.notice).toBe(
-      `No opportunities matched these filters. Remove one filter at a time, or call grantsgov_list_reference to confirm the codes. ${RERUN}`,
+      `No opportunities matched these filters. ${ALN_FRAGMENT('93.ECH')} ${RERUN}`,
     );
     expect((await pageBodies())[0]?.cfda).toBe('93.ECH');
+  });
+
+  it('never sends an assistance_listing-only search to grantsgov_list_reference, which has no ALN topic', async () => {
+    page([], 0, {});
+    const { enrichment } = await run({ assistance_listing: '99.999' });
+    expect(enrichment.notice).not.toContain('grantsgov_list_reference');
+    expect(enrichment.notice).toContain('search the program name as keyword');
+  });
+
+  it('names only the code filters grantsgov_list_reference can confirm', async () => {
+    page([], 0, {});
+    const { enrichment } = await run({
+      agencies: ['NSF'],
+      funding_categories: ['HL'],
+      assistance_listing: '93866',
+    });
+    expect(enrichment.notice).toBe(
+      [
+        'No opportunities matched these filters.',
+        ALN_FRAGMENT('93.866'),
+        'Remove one filter at a time, or confirm the agencies and funding_categories codes with grantsgov_list_reference.',
+        RERUN,
+      ].join(' '),
+    );
   });
 
   it('adds the exact-match fragment in opportunity-number mode, without the status counts', async () => {
@@ -612,8 +650,16 @@ describe('opportunity-number mode', () => {
     expect(ids(result)).toEqual(['360001']);
   });
 
-  it('rejects a double quote at the schema', () => {
+  it('rejects a double quote inside the number at the schema', () => {
     expect(() => tool.input.parse({ opportunity_number: 'A"B' })).toThrow();
+  });
+
+  it('removes one pair of surrounding double quotes and quotes the number once upstream', async () => {
+    page([HRSA_HIT]);
+    const { result, enrichment } = await run({ opportunity_number: ' "HRSA-27-005" ' });
+    expect((await pageBodies())[0]?.oppNum).toBe('"HRSA-27-005"');
+    expect(ids(result)).toEqual(['363423']);
+    expect(enrichment.applied_filters).toMatchObject({ opportunity_number: 'HRSA-27-005' });
   });
 });
 
@@ -880,6 +926,33 @@ describe('error contract', () => {
   });
 
   it.each([
+    [
+      'broadband OR internet rural',
+      'it mixes AND and OR without parentheses (broadband OR internet AND rural; bare terms are joined by AND), so which terms are alternatives is ambiguous',
+      'Add parentheses to say which terms are alternatives, e.g. (broadband OR internet) AND rural or broadband OR (internet AND rural).',
+    ],
+    [
+      'agency:NSF',
+      'it uses field syntax (agency:NSF), which keyword does not support',
+      'Drop "agency:" and pass NSF in the agencies filter (codes from grantsgov_list_reference topic agencies), or keep NSF as a plain keyword term to match it anywhere in the text.',
+    ],
+    [
+      'cfda:93.866',
+      'it uses field syntax (cfda:93.866), which keyword does not support',
+      'Drop "cfda:" and pass 93.866 in the assistance_listing filter, or keep 93.866 as a plain keyword term to match it anywhere in the text.',
+    ],
+  ])(
+    'throws invalid_keyword for %j with a keyword-specific recovery hint',
+    async (keyword, problem, hint) => {
+      const error = await failure({ keyword });
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(`The keyword was rejected because ${problem}.`);
+      expect(error.data).toMatchObject({ reason: 'invalid_keyword', keyword, recovery: { hint } });
+      expect(http.calls).toHaveLength(0);
+    },
+  );
+
+  it.each([
     ['xyz', 'XYZ'],
     ['HHS-O', 'HHS-O'],
   ])('throws unknown_agency for %j, naming the normalized code', async (raw, code) => {
@@ -992,6 +1065,8 @@ describe('input schema', () => {
     ['an unknown sort', { sort: 'relevance_desc' }],
     ['an unknown funding instrument', { funding_instruments: ['X'] }],
     ['a three-digit eligibility', { eligibilities: ['123'] }],
+    ['a three-digit numeric eligibility', { eligibilities: [123] }],
+    ['an empty quoted opportunity number', { opportunity_number: '""' }],
     ['a wildcard agency code', { agencies: ['HHS*'] }],
     ['a malformed ALN', { assistance_listing: '93.8666' }],
     ['a multi-value ALN', { assistance_listing: '93.866|47.076' }],

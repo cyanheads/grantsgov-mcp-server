@@ -11,7 +11,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getGrantsGovService } from '@/services/grants-gov/grants-gov-service.js';
 import { resolveAgencyScope } from '@/services/grants-gov/reference.js';
 import type { ReferenceCode, ReferenceSnapshot } from '@/services/grants-gov/types.js';
-import { AGENCY_CODE, normalizeAgencyCode, optionalText } from '../input-schemas.js';
+import { AGENCY_CODE_INPUT, optionalText, trimLower } from '../input-schemas.js';
 import { tableCell } from '../render.js';
 
 const TOPICS = [
@@ -116,7 +116,7 @@ const KEYWORD_SYNTAX_ENTRIES: readonly Entry[] = [
     code: 'OR',
     label: 'Any of',
     description:
-      'rural OR tribal matches either word. Use OR to widen a search instead of listing bare words.',
+      'rural OR tribal matches either word. Use OR to widen a search instead of listing bare words. OR combined with AND, or with a bare word beside it, must be grouped in parentheses: (rural OR tribal) broadband. An ungrouped mix such as rural OR tribal broadband is rejected, because Grants.gov does not apply operator precedence to it and silently drops the OR alternative.',
   },
   {
     code: 'NOT / -term',
@@ -128,7 +128,7 @@ const KEYWORD_SYNTAX_ENTRIES: readonly Entry[] = [
     code: '( … )',
     label: 'Group',
     description:
-      '(rural OR tribal) AND broadband groups alternatives. Unbalanced quotes or parentheses and a leading, trailing, or doubled operator are rejected.',
+      '(rural OR tribal) AND broadband groups alternatives; rural OR (tribal AND broadband) is the other grouping. Each pair of parentheses may join its terms with AND or with OR, not both. Unbalanced quotes or parentheses and a leading, trailing, or doubled operator are rejected.',
   },
   {
     code: 'term*',
@@ -137,10 +137,16 @@ const KEYWORD_SYNTAX_ENTRIES: readonly Entry[] = [
       'broad* matches broadband, broadcast, and other words starting with broad. Trailing position only.',
   },
   {
+    code: 'field:value',
+    label: 'Field prefix (rejected)',
+    description:
+      'agency:NSF, cfda:93.866, title:broadband and other field prefixes are rejected. Filter with agencies, assistance_listing, opportunity_number, eligibilities, funding_categories, funding_instruments, or statuses instead, or drop the prefix to match the value as text.',
+  },
+  {
     code: ': ~ ? [ ] { } ^ \\ / ! +',
     label: 'Removed characters',
     description:
-      'Field, fuzzy, range, and boost syntax is not supported; these characters are replaced by a space. && and || are read as AND and OR.',
+      'Fuzzy, range, and boost syntax is not supported; these characters are replaced by a space, as is a colon not attached to a field prefix. && and || are read as AND and OR.',
   },
 ];
 
@@ -209,16 +215,14 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
 
   input: z.object({
     topic: z
-      .enum(TOPICS)
+      .preprocess(trimLower, z.enum(TOPICS))
       .describe(
         'Which list to return: agencies (agency codes), eligibilities (two-digit applicant-type codes), funding_categories, funding_instruments, statuses, sort_options, or keyword_syntax.',
       ),
     name_contains: optionalText(z.string().max(100)).describe(
       'Keep only entries whose label or code contains every word given, ignoring case, accents, and punctuation (e.g. "national science", "nih"). For agencies this searches every code, top-level and sub-agency. Works with every topic. A value with no letters or digits matches nothing.',
     ),
-    parent_code: optionalText(
-      z.preprocess(normalizeAgencyCode, z.string().regex(AGENCY_CODE)),
-    ).describe(
+    parent_code: optionalText(AGENCY_CODE_INPUT).describe(
       'Agencies only: list every code under this agency at any depth (e.g. HHS, DOD-DARPA). Case-insensitive. Omit for the top-level list.',
     ),
   }),
@@ -246,7 +250,7 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
               .number()
               .optional()
               .describe(
-                'Forecasted + posted opportunities with this code. For a top-level agency this covers its sub-agencies; for a sub-agency, only records filed at exactly this code.',
+                'Forecasted + posted opportunities with this code. For an agency, the count a grantsgov_search_opportunities agencies filter on this code returns: the code and every sub-agency under it.',
               ),
             total_count: z
               .number()

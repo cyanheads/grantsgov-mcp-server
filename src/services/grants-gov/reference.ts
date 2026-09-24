@@ -78,6 +78,11 @@ function vocabulary(
  * allowlist. Agency parents come from hyphen prefixes: a code's parent is the
  * longest other code it extends (`DOT-FTA - TPM` → `DOT-FTA`), else its top-level
  * agency. A top-level agency listed under itself is folded into its own row.
+ *
+ * Agency counts are subtree counts, matching what an agencies filter on the code
+ * returns. A top-level agency's facet count already covers its sub-agencies; a
+ * sub-agency's covers only records filed at exactly that code, so its
+ * descendants' counts are added (each record carries one agency code).
  */
 export function buildReferenceSnapshot(
   all: RawFacets,
@@ -130,13 +135,18 @@ export function buildReferenceSnapshot(
   const agencies = new Map<string, AgencyNode>();
   for (const code of codes.sort((a, b) => a.localeCompare(b))) {
     const parentCode = parents.get(code);
+    const descendants = descendantsOf(code).sort((a, b) => a.localeCompare(b));
+    /** Top-level facet counts are already subtree counts; a sub-agency's are its own code only. */
+    const subtree = parentCode === undefined ? [code] : [code, ...descendants];
+    const sum = (counts: ReadonlyMap<string, number>) =>
+      subtree.reduce((total, member) => total + (counts.get(member) ?? 0), 0);
     agencies.set(code, {
       code,
       label: labels.get(code) ?? code,
-      openCount: openCounts.get(code) ?? 0,
-      totalCount: totals.get(code) ?? 0,
+      openCount: sum(openCounts),
+      totalCount: sum(totals),
       children: (children.get(code) ?? []).sort((a, b) => a.localeCompare(b)),
-      descendants: descendantsOf(code).sort((a, b) => a.localeCompare(b)),
+      descendants,
       ...(parentCode !== undefined && { parentCode }),
     });
   }

@@ -86,6 +86,45 @@ describe('buildReferenceSnapshot — agency tree', () => {
     expect(node('HHS-NIH11')).toMatchObject({ openCount: 697, totalCount: 12853 });
     expect(node('DOT')).toMatchObject({ openCount: 0, totalCount: 1492 });
   });
+
+  it('counts a sub-agency with children over its whole subtree, as an agencies filter on it matches', () => {
+    expect(node('HHS-CDC').totalCount).toBe(1728 + 139);
+    expect(node('DOT-FAA').totalCount).toBe(10 + 5 + 4 + 4 + 2 + 1 + 1);
+    expect(node('DOT-FAA-FAA COE').totalCount).toBe(4 + 2 + 1 + 1);
+    expect(node('DOT-FTA').totalCount).toBe(197 + 2);
+    expect(node('DOT-FTA - TPM').totalCount).toBe(2);
+  });
+
+  it('keeps top-level facet counts as they are: they already cover the subtree', () => {
+    expect(node('DOC').totalCount).toBe(1419);
+    expect(node('USDA').totalCount).toBe(2996);
+  });
+
+  it('reports open records filed under a mid-level agency with none filed at its own code (HHS-CDC)', () => {
+    const built = buildReferenceSnapshot(
+      FACETS_ALL,
+      {
+        agencies: [
+          {
+            value: 'HHS',
+            label: 'Department of Health and Human Services',
+            count: 940,
+            subAgencyOptions: [
+              {
+                value: 'HHS-CDC-NCCDPHP',
+                label: 'Centers for Disease Control - NCCDPHP',
+                count: 93,
+              },
+            ],
+          },
+        ],
+      },
+      FETCHED_AT,
+    );
+    expect(built.agencies.get('HHS-CDC')).toMatchObject({ openCount: 93 });
+    expect(built.agencies.get('HHS-CDC-NCCDPHP')).toMatchObject({ openCount: 93 });
+    expect(built.agencies.get('HHS')).toMatchObject({ openCount: 940 });
+  });
 });
 
 describe('buildReferenceSnapshot — flat vocabularies', () => {

@@ -33,12 +33,14 @@ import type {
   Search2Body,
 } from '@/services/grants-gov/types.js';
 import {
-  AGENCY_CODE,
-  normalizeAgencyCode,
+  AGENCY_CODE_INPUT,
+  normalizedString,
   numberFromDigits,
-  OPPORTUNITY_NUMBER,
+  OPPORTUNITY_NUMBER_INPUT,
   optionalList,
   optionalText,
+  rawPattern,
+  trimLower,
 } from '../input-schemas.js';
 import { inline, tableCell } from '../render.js';
 
@@ -79,29 +81,52 @@ const NUMBER_MODE_ROWS = 100;
 /** The unrestricted applicant-type code ("open to any type of entity"). */
 const UNRESTRICTED = '99';
 
-const trimLower = (value: unknown): unknown =>
-  typeof value === 'string' ? value.trim().toLowerCase() : value;
-
 const trimUpper = (value: unknown): unknown =>
   typeof value === 'string' ? value.trim().toUpperCase() : value;
 
-/** `7` or `"7"` → `"07"`: the upstream matches zero-padded codes only. */
-const padEligibility = (value: unknown): unknown => {
-  const text = typeof value === 'number' ? String(value) : value;
-  if (typeof text !== 'string') return text;
-  const trimmed = text.trim();
-  return /^\d$/.test(trimmed) ? `0${trimmed}` : trimmed;
-};
+/**
+ * An applicant-type code, as a string or a number, zero-padded to two digits
+ * (`7` → `07`): the upstream matches zero-padded codes only.
+ */
+const ELIGIBILITY_INPUT = z
+  .union([
+    z
+      .string()
+      .regex(rawPattern('\\d{1,2}'), 'An applicant-type code is one or two digits, e.g. 12.'),
+    z.number().int().min(0).max(99),
+  ])
+  .transform((code) => String(code).trim().padStart(2, '0'))
+  .pipe(z.string().regex(/^\d{2}$/));
+
+/** A funding category code in any case (`hl` → `HL`; lowercase matches nothing upstream). */
+const FUNDING_CATEGORY_INPUT = normalizedString(
+  rawPattern('[A-Za-z]{1,4}'),
+  'A funding category code is 1-4 letters, e.g. HL.',
+  (code) => code.trim().toUpperCase(),
+  z.string().regex(/^[A-Z]{1,4}$/),
+);
 
 /** Uppercases, strips a leading `ALN`/`CFDA` label, and dots a 5-character form (`93866` → `93.866`). */
-const normalizeAln = (value: unknown): unknown => {
-  if (typeof value !== 'string') return value;
+const normalizeAln = (value: string): string => {
   const bare = value
     .trim()
     .toUpperCase()
     .replace(/^(?:ALN|CFDA)(?:\s*(?:NO\.?|NUMBER))?\s*[:#]?\s*/, '');
   return /^\d{2}[0-9A-Z]{3}$/.test(bare) ? `${bare.slice(0, 2)}.${bare.slice(2)}` : bare;
 };
+
+/** One assistance listing number in any of its written forms (`93866`, `93.ech`, `ALN 93.866`). */
+const ALN_INPUT = normalizedString(
+  rawPattern('(?:[A-Za-z][A-Za-z .]*[:#]?\\s*)?\\d{2}\\.?[0-9A-Za-z]{3}'),
+  'An assistance listing number is two digits, a dot, and three characters, e.g. 93.866.',
+  normalizeAln,
+  z
+    .string()
+    .regex(
+      /^\d{2}\.[0-9A-Z]{3}$/,
+      'An assistance listing number is two digits, a dot, and three characters, e.g. 93.866.',
+    ),
+);
 
 const facetList = (description: string) =>
   z
@@ -292,6 +317,10 @@ async function withUppercaseRetry<T>(
   return await run(opportunityNumber.toUpperCase());
 }
 
+/** `['a']` → `a`; `['a', 'b']` → `a and b`; `['a', 'b', 'c']` → `a, b, and c`. */
+const joinNames = (names: readonly string[]) =>
+  names.length <= 2 ? names.join(' and ') : `${names.slice(0, -1).join(', ')}, and ${names.at(-1)}`;
+
 const pluralDays = (days: number) => `${days} day${days === 1 ? '' : 's'}`;
 
 /** `closing_within_days` as prose: 0 is today (US Eastern). */
@@ -327,27 +356,21 @@ function emptyWindowNotice(scan: ClosingWindowScan, closingDays: number, today: 
 export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities', {
   title: 'Search Grants.gov Opportunities',
   description:
-    'Search federal funding opportunities on Grants.gov by keyword, agency, applicant eligibility, funding category, funding instrument, assistance listing, opportunity number, posting window (posted_within_days), or closing window (closing_within_days). Returns forecasted and posted opportunities unless statuses says otherwise, each row led by its close date and days remaining, plus facet counts for narrowing. Keyword terms are all required; join alternatives with OR. Rows carry no award amounts or eligibility detail; read those with grantsgov_get_opportunity. Filter codes come from grantsgov_list_reference.',
+    'Search federal funding opportunities on Grants.gov by keyword, agency, applicant eligibility, funding category, funding instrument, assistance listing, opportunity number, posting window (posted_within_days), or closing window (closing_within_days). Returns forecasted and posted opportunities unless statuses says otherwise, each row led by its close date and days remaining, plus facet counts for narrowing. Bare keyword terms are all required; join alternatives with OR, in parentheses when other terms stay required. Rows carry no award amounts or eligibility detail; read those with grantsgov_get_opportunity. Filter codes come from grantsgov_list_reference.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     keyword: optionalText(z.string().max(500)).describe(
-      'Full-text search over title, description, opportunity number, and agency. Every term is required (rural broadband = rural AND broadband); join alternatives with OR, group with parentheses, quote phrases ("mental health"), exclude with NOT or -term, and use a trailing * for prefixes (broad*). A word with an internal hyphen or period (COVID-19, K-12) is matched as a phrase. See grantsgov_list_reference topic keyword_syntax.',
+      'Full-text search over title, description, opportunity number, and agency. Bare terms are all required (rural broadband = rural AND broadband); join alternatives with OR, quote phrases ("mental health"), exclude with NOT or -term, and use a trailing * for prefixes (broad*). OR mixed with AND or with bare terms must be grouped in parentheses, e.g. (rural OR tribal) broadband; an ungrouped mix is rejected. A word with an internal hyphen or period (COVID-19, K-12) is matched as a phrase. Field prefixes (agency:NSF, cfda:93.866) are rejected: use the agencies, assistance_listing, or other filter instead. See grantsgov_list_reference topic keyword_syntax.',
     ),
     statuses: optionalList(z.preprocess(trimLower, z.enum(STATUSES)), 4).describe(
-      'Lifecycle statuses to include: forecasted, posted, closed, archived. Case-insensitive. Default: forecasted and posted.',
+      'Lifecycle statuses to include: forecasted, posted, closed, archived. Default: forecasted and posted.',
     ),
-    agencies: optionalList(
-      z.preprocess(normalizeAgencyCode, z.string().regex(AGENCY_CODE)),
-      10,
-    ).describe(
+    agencies: optionalList(AGENCY_CODE_INPUT, 10).describe(
       'Agency codes from grantsgov_list_reference topic agencies (e.g. HHS, HHS-NIH11, NSF). A code includes its sub-agencies. Case-insensitive. Any listed agency matches.',
     ),
-    eligibilities: optionalList(
-      z.preprocess(padEligibility, z.string().regex(/^\d{2}$/)),
-      17,
-    ).describe(
-      'Two-digit applicant-type codes from grantsgov_list_reference topic eligibilities (e.g. 12 = nonprofits with 501(c)(3) status, 07 = federally recognized tribal governments). A single digit is zero-padded. Any listed type matches.',
+    eligibilities: optionalList(ELIGIBILITY_INPUT, 17).describe(
+      'Two-digit applicant-type codes from grantsgov_list_reference topic eligibilities (e.g. 12 = nonprofits with 501(c)(3) status, 07 = federally recognized tribal governments), as strings or numbers. A single digit is zero-padded (7 = 07). Any listed type matches.',
     ),
     include_unrestricted: z
       .boolean()
@@ -355,25 +378,20 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       .describe(
         'When eligibilities is set, also match opportunities open to any applicant type (code 99), which the specific codes do not cover. Set false to see only opportunities targeted at the listed types.',
       ),
-    funding_categories: optionalList(
-      z.preprocess(trimUpper, z.string().regex(/^[A-Z]{1,4}$/)),
-      28,
-    ).describe(
+    funding_categories: optionalList(FUNDING_CATEGORY_INPUT, 28).describe(
       'Funding category codes from grantsgov_list_reference topic funding_categories (e.g. HL = Health, ED = Education). Case-insensitive. Any listed category matches.',
     ),
     funding_instruments: optionalList(
       z.preprocess(trimUpper, z.enum(FUNDING_INSTRUMENTS)),
       4,
     ).describe(
-      'Funding instruments: G (grant), CA (cooperative agreement), PC (procurement contract), O (other). Case-insensitive. Any listed instrument matches.',
+      'Funding instruments: G (grant), CA (cooperative agreement), PC (procurement contract), O (other). Any listed instrument matches.',
     ),
-    assistance_listing: optionalText(
-      z.preprocess(normalizeAln, z.string().regex(/^\d{2}\.[0-9A-Z]{3}$/)),
-    ).describe(
-      'One assistance listing number (ALN, formerly CFDA), e.g. 93.866 or 93866. Only one value is supported.',
+    assistance_listing: optionalText(ALN_INPUT).describe(
+      'One assistance listing number (ALN, formerly CFDA), e.g. 93.866 or 93866, in any case. Only one value is supported.',
     ),
-    opportunity_number: optionalText(OPPORTUNITY_NUMBER).describe(
-      'Exact agency-assigned opportunity number (e.g. HRSA-27-005), matched case-insensitively. Numbers are not unique across agencies, so several rows can match. To look up a number across every status, prefer grantsgov_get_opportunity with opportunity_numbers.',
+    opportunity_number: optionalText(OPPORTUNITY_NUMBER_INPUT).describe(
+      'Exact agency-assigned opportunity number (e.g. HRSA-27-005), matched case-insensitively; one pair of surrounding double quotes is removed. Numbers are not unique across agencies, so several rows can match. To look up a number across every status, prefer grantsgov_get_opportunity with opportunity_numbers.',
     ),
     posted_within_days: z
       .preprocess(numberFromDigits, z.number().int().min(1).max(3650).optional())
@@ -562,7 +580,9 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       if (!compiled.ok) {
         throw ctx.fail('invalid_keyword', `The keyword was rejected because ${compiled.problem}.`, {
           keyword: input.keyword,
-          ...ctx.recoveryFor('invalid_keyword'),
+          ...(compiled.hint !== undefined
+            ? { recovery: { hint: compiled.hint } }
+            : ctx.recoveryFor('invalid_keyword')),
         });
       }
       keyword = compiled;
@@ -775,7 +795,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       }
       if (keyword?.andJoined) {
         fragments.push(
-          `All keyword terms were required (${keyword.compiled}); join alternatives with OR, or drop a term.`,
+          `All keyword terms were required (${keyword.compiled}); join alternatives with OR, in parentheses when other terms stay required, or drop a term.`,
         );
       }
       if (input.eligibilities !== undefined && !input.include_unrestricted) {
@@ -793,15 +813,20 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
           'opportunity_number is exact-match; call grantsgov_get_opportunity with opportunity_numbers to search every status, or put the number in quotes in keyword for a full-text match.',
         );
       }
-      if (
-        input.agencies !== undefined ||
-        input.eligibilities !== undefined ||
-        fundingCategories !== undefined ||
-        fundingInstruments !== undefined ||
-        input.assistance_listing !== undefined
-      ) {
+      if (input.assistance_listing !== undefined) {
         fragments.push(
-          'Remove one filter at a time, or call grantsgov_list_reference to confirm the codes.',
+          `assistance_listing is one exact ALN (${input.assistance_listing}); confirm the number (each grantsgov_get_opportunity record lists its assistance_listings), or drop assistance_listing and search the program name as keyword.`,
+        );
+      }
+      const codeFilters = [
+        input.agencies !== undefined && 'agencies',
+        input.eligibilities !== undefined && 'eligibilities',
+        fundingCategories !== undefined && 'funding_categories',
+        fundingInstruments !== undefined && 'funding_instruments',
+      ].filter((name): name is string => typeof name === 'string');
+      if (codeFilters.length > 0) {
+        fragments.push(
+          `Remove one filter at a time, or confirm the ${joinNames(codeFilters)} codes with grantsgov_list_reference.`,
         );
       }
       fragments.push('Rerun with fewer filters to see facet counts for refining.');

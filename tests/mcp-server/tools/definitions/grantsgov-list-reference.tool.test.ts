@@ -193,6 +193,27 @@ describe('agencies', () => {
     expect(enrichment).toEqual({ totalCount: 6 });
   });
 
+  it('counts a mid-level agency over its subtree, matching an agencies search on it', async () => {
+    const { result } = await run({ topic: 'agencies', parent_code: 'HHS' });
+    expect(result.entries.find((entry) => entry.code === 'HHS-CDC')).toEqual({
+      code: 'HHS-CDC',
+      label: 'Centers for Disease Control and Prevention',
+      parent_code: 'HHS',
+      has_children: true,
+      open_count: 0,
+      total_count: 1728 + 139,
+    });
+    expect(result.entries.find((entry) => entry.code === 'HHS-CDC-NCCDPHP')).toMatchObject({
+      has_children: false,
+      total_count: 139,
+    });
+  });
+
+  it('accepts the topic in any case', async () => {
+    const { result } = await run({ topic: ' Agencies ' });
+    expect(result.topic).toBe('agencies');
+  });
+
   it('includes a " - "-joined child under its parent (DOT-FTA - TPM)', async () => {
     const { result } = await run({ topic: 'agencies', parent_code: 'DOT-FTA' });
     expect(result.entries).toEqual([
@@ -254,6 +275,7 @@ describe('input schema', () => {
 
   it('rejects an unknown topic and an overlong name_contains', () => {
     expect(() => tool.input.parse({ topic: 'agency' })).toThrow();
+    expect(() => tool.input.parse({ topic: 'AGENCY' })).toThrow();
     expect(() => tool.input.parse({ topic: 'agencies', name_contains: 'x'.repeat(101) })).toThrow();
   });
 });

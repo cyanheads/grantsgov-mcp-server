@@ -282,6 +282,15 @@ describe('by number', () => {
     expect(result.opportunities).toHaveLength(1);
   });
 
+  it('removes one pair of surrounding double quotes before quoting the number upstream', async () => {
+    serveNumbers({ '"HRSA-27-005"': [HRSA_HIT] });
+    serveDetails({ 363423: DETAIL_HRSA });
+    const { result } = await run({ opportunity_numbers: ['"HRSA-27-005"'] });
+    expect((await bodiesTo(SEARCH2_URL)).map((body) => body.oppNum)).toEqual(['"HRSA-27-005"']);
+    expect(result.opportunities).toHaveLength(1);
+    expect(result.unresolved).toEqual([]);
+  });
+
   it('keeps a number containing a space literal', async () => {
     const hit: RawHit = { ...HRSA_HIT, number: 'PAS-TUNIS- APS FY2026' };
     serveNumbers({ '"PAS-TUNIS- APS FY2026"': [hit] });
@@ -805,6 +814,9 @@ describe('error contract', () => {
 describe('input schema', () => {
   it.each([
     ['an id of 0', { opportunity_ids: [0] }],
+    ['a digit-string id of 0', { opportunity_ids: ['0'] }],
+    ['an id past the safe-integer range', { opportunity_ids: ['99999999999999999999'] }],
+    ['a fractional id', { opportunity_ids: [1.5] }],
     ['a non-numeric id', { opportunity_ids: ['HRSA-27-005'] }],
     ['a negative id', { opportunity_ids: [-5] }],
     ['a number with a double quote', { opportunity_numbers: ['A"B'] }],

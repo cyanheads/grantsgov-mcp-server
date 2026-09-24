@@ -205,7 +205,10 @@ export interface ReferenceCode {
   totalCount: number;
 }
 
-/** An agency code in the snapshot's tree. */
+/**
+ * An agency code in the snapshot's tree. `openCount` and `totalCount` cover the
+ * code and every descendant: the set an agencies filter on the code matches.
+ */
 export interface AgencyNode extends ReferenceCode {
   /** Direct children. */
   children: string[];

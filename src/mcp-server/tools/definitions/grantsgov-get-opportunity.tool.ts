@@ -28,7 +28,7 @@ import type {
   RawDetail,
   RawHit,
 } from '@/services/grants-gov/types.js';
-import { numberFromDigits, OPPORTUNITY_NUMBER, optionalList } from '../input-schemas.js';
+import { OPPORTUNITY_NUMBER_INPUT, optionalList } from '../input-schemas.js';
 import { blockquote, inline, tableCell } from '../render.js';
 
 const STATUSES = ['forecasted', 'posted', 'closed', 'archived'] as const;
@@ -41,6 +41,15 @@ const CATEGORY_EXPLANATION_CAP = 2_000;
 const ATTACHMENT_CAP = 30;
 const PACKAGE_CAP = 10;
 const RELATED_CAP = 10;
+
+/** A numeric id, as a number or a digit string (search rows emit `"363423"`). */
+const OPPORTUNITY_ID_INPUT = z
+  .union([
+    z.number().int().min(1),
+    z.string().regex(/^\s*\d+\s*$/, 'An opportunity id is a positive whole number, e.g. 363423.'),
+  ])
+  .transform(Number)
+  .pipe(z.number().int().min(1, 'An opportunity id is a positive whole number, e.g. 363423.'));
 
 const DETAIL_URL = 'https://www.grants.gov/search-results-detail/';
 const ATTACHMENT_URL = 'https://apply07.grants.gov/grantsws/rest/opportunity/att/download/';
@@ -771,14 +780,11 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
-    opportunity_ids: optionalList(
-      z.preprocess(numberFromDigits, z.number().int().min(1)),
-      MAX_IDENTIFIERS,
-    ).describe(
+    opportunity_ids: optionalList(OPPORTUNITY_ID_INPUT, MAX_IDENTIFIERS).describe(
       'Numeric Grants.gov ids (e.g. 363423, or "363423" as search rows emit them), from grantsgov_search_opportunities opportunity_id. Up to 5 combined with opportunity_numbers.',
     ),
-    opportunity_numbers: optionalList(OPPORTUNITY_NUMBER, MAX_IDENTIFIERS).describe(
-      'Agency-assigned opportunity numbers (e.g. HRSA-27-005), matched exactly and case-insensitively across all statuses. A number shared by several opportunities comes back as ambiguous with candidates. Up to 5 combined with opportunity_ids.',
+    opportunity_numbers: optionalList(OPPORTUNITY_NUMBER_INPUT, MAX_IDENTIFIERS).describe(
+      'Agency-assigned opportunity numbers (e.g. HRSA-27-005), matched exactly and case-insensitively across all statuses; one pair of surrounding double quotes is removed. A number shared by several opportunities comes back as ambiguous with candidates. Up to 5 combined with opportunity_ids.',
     ),
   }),
 
