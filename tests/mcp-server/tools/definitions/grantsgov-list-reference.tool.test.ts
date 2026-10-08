@@ -16,12 +16,13 @@ import {
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { grantsgovListReference } from '@/mcp-server/tools/definitions/grantsgov-list-reference.tool.js';
+import { grantsgovSearchOpportunities } from '@/mcp-server/tools/definitions/grantsgov-search-opportunities.tool.js';
 import {
   getGrantsGovService,
   initGrantsGovService,
 } from '@/services/grants-gov/grants-gov-service.js';
 import { json, referenceRoute, SEARCH2_URL } from '../../../fixtures/grants-gov.js';
-import { drained, rejectionOf } from '../../../fixtures/harness.js';
+import { contractFailure, drained } from '../../../fixtures/harness.js';
 
 const tool = grantsgovListReference;
 type Input = Parameters<typeof tool.input.parse>[0];
@@ -46,10 +47,8 @@ async function run(raw: Input) {
   return { result, enrichment: getEnrichment(ctx) };
 }
 
-const failure = (raw: Input) =>
-  rejectionOf(() =>
-    tool.handler(tool.input.parse(raw), createMockContext({ errors: tool.errors })),
-  );
+/** The error envelope a client receives, recovery hint filled. */
+const failure = (raw: Record<string, unknown>) => contractFailure(tool, raw);
 
 const codes = (entries: { code: string }[]) => entries.map((entry) => entry.code);
 
@@ -329,6 +328,34 @@ describe('error contract', () => {
       retryAttempts: 3,
       recovery: {
         hint: 'Grants.gov is not responding; wait a minute and call grantsgov_list_reference again.',
+      },
+    });
+  });
+
+  it('gives each concurrent caller of a failed shared snapshot build its own tool’s hint', async () => {
+    http.route({
+      method: 'POST',
+      match: SEARCH2_URL,
+      respond: json({ message: 'Internal server error' }, 502),
+    });
+    const [listed, searched] = await drained(() =>
+      Promise.all([
+        failure({ topic: 'agencies' }),
+        contractFailure(grantsgovSearchOpportunities, { agencies: ['NSF'] }),
+      ]),
+    );
+    // One build: two facet calls, three attempts each.
+    expect(http.calls).toHaveLength(6);
+    expect(listed.data).toMatchObject({
+      reason: 'upstream_unavailable',
+      recovery: {
+        hint: 'Grants.gov is not responding; wait a minute and call grantsgov_list_reference again.',
+      },
+    });
+    expect(searched.data).toMatchObject({
+      reason: 'upstream_unavailable',
+      recovery: {
+        hint: 'Grants.gov is not responding; wait a minute and call grantsgov_search_opportunities again.',
       },
     });
   });

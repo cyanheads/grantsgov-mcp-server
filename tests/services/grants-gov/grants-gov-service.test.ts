@@ -13,7 +13,6 @@ import {
   type FetchMockHarness,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { grantsgovListReference } from '@/mcp-server/tools/definitions/grantsgov-list-reference.tool.js';
 import { ALL_STATUSES, GrantsGovService } from '@/services/grants-gov/grants-gov-service.js';
 import { addDays, todayET } from '@/services/grants-gov/normalize.js';
 import {
@@ -39,8 +38,7 @@ import {
 } from '../../fixtures/grants-gov.js';
 import { drained, rejectionOf } from '../../fixtures/harness.js';
 
-const ctxFor = (options: { signal?: AbortSignal } = {}) =>
-  createMockContext({ errors: grantsgovListReference.errors, ...options });
+const ctxFor = (options: { signal?: AbortSignal } = {}) => createMockContext(options);
 
 let http: FetchMockHarness;
 let service: GrantsGovService;
@@ -121,8 +119,8 @@ describe('accept-list and body classification', () => {
       reason: 'upstream_route_unavailable',
       retryable: false,
       status: 403,
-      recovery: { hint: expect.stringContaining('report this to the server maintainer') },
     });
+    expect(error.data).not.toHaveProperty('recovery');
     expect(http.calls).toHaveLength(1);
   });
 
@@ -136,8 +134,8 @@ describe('accept-list and body classification', () => {
       reason: 'upstream_unavailable',
       status: 502,
       retryAttempts: 3,
-      recovery: { hint: expect.stringContaining('call grantsgov_list_reference again') },
     });
+    expect(error.data).not.toHaveProperty('recovery');
     expect(http.calls).toHaveLength(3);
   });
 

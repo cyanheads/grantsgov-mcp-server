@@ -1,10 +1,12 @@
 /**
  * @fileoverview Shared helpers for exercising failure paths: capturing a
- * rejection as the error the framework serializes, and draining the service's
- * retry backoff under fake timers.
+ * rejection as the error the framework serializes, reading a tool's error
+ * envelope as a client receives it, and draining the service's retry backoff
+ * under fake timers.
  * @module tests/fixtures/harness
  */
 
+import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { vi } from 'vitest';
 
 /** A thrown tool error: JSON-RPC code, message, and structured data. */
@@ -18,6 +20,20 @@ export async function rejectionOf(call: () => unknown): Promise<Failure> {
     return err as Failure;
   }
   throw new Error('Expected the call to reject');
+}
+
+/**
+ * Runs a tool call's raw arguments through `runToolContract` and returns its
+ * error envelope, with the contract's recovery hint filled in as a client
+ * receives it. Fails the test when the call succeeds.
+ */
+export async function contractFailure(
+  definition: Parameters<typeof runToolContract>[0],
+  args: Record<string, unknown>,
+): Promise<Failure> {
+  const result = await runToolContract(definition, args);
+  if (!result.isError) throw new Error('Expected the call to fail');
+  return (result.structuredContent as { error: Failure }).error;
 }
 
 /**

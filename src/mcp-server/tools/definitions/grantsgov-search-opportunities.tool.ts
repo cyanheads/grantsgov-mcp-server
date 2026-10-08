@@ -564,9 +564,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       if (!compiled.ok) {
         throw ctx.fail('invalid_keyword', `The keyword was rejected because ${compiled.problem}.`, {
           keyword: input.keyword,
-          ...(compiled.hint !== undefined
-            ? { recovery: { hint: compiled.hint } }
-            : ctx.recoveryFor('invalid_keyword')),
+          ...(compiled.hint !== undefined && { recovery: { hint: compiled.hint } }),
         });
       }
       keyword = compiled;
@@ -607,7 +605,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         throw ctx.fail(
           'unknown_eligibility',
           `"${unknown}" is not a Grants.gov applicant-type code.`,
-          { eligibility: unknown, ...ctx.recoveryFor('unknown_eligibility') },
+          { eligibility: unknown },
         );
       }
       if (input.include_unrestricted && !codes.includes(UNRESTRICTED)) codes.push(UNRESTRICTED);
@@ -622,7 +620,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         throw ctx.fail(
           'unknown_funding_category',
           `"${unknown}" is not a Grants.gov funding category code.`,
-          { fundingCategory: unknown, ...ctx.recoveryFor('unknown_funding_category') },
+          { fundingCategory: unknown },
         );
       }
     }

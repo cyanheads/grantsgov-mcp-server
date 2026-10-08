@@ -7,7 +7,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import {
   createPacer,
   httpErrorFromResponse,
@@ -95,11 +95,14 @@ export function cutClosingWindow(
   return { windowHits };
 }
 
-/** A service-layer `upstream_unavailable` error carrying the calling tool's recovery hint. */
-function upstreamUnavailable(message: string, ctx: Context, cause?: unknown): McpError {
+/**
+ * A service-layer `upstream_unavailable` error. The calling tool's contract
+ * fills its recovery hint from the reason.
+ */
+function upstreamUnavailable(message: string, cause?: unknown): McpError {
   return serviceUnavailable(
     message,
-    { reason: 'upstream_unavailable', ...ctx.recoveryFor('upstream_unavailable') },
+    { reason: 'upstream_unavailable' },
     cause === undefined ? undefined : { cause },
   );
 }
@@ -111,20 +114,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const excerpt = (value: unknown) => String(value).replace(/\s+/g, ' ').trim().slice(0, 200);
 
 /** Maps a status outside the accept-list to its error without ever parsing the body as data. */
-async function statusError(
-  response: Response,
-  endpoint: Endpoint,
-  ctx: Context,
-): Promise<McpError> {
+async function statusError(response: Response, endpoint: Endpoint): Promise<McpError> {
   if (response.status === 403) {
     return serviceUnavailable(
       `Grants.gov ${endpoint} answered HTTP 403 (Missing Authentication Token), which means the route no longer exists at the gateway.`,
-      {
-        reason: 'upstream_route_unavailable',
-        retryable: false,
-        status: 403,
-        ...ctx.recoveryFor('upstream_route_unavailable'),
-      },
+      { reason: 'upstream_route_unavailable', retryable: false, status: 403 },
     );
   }
   const reason =
@@ -137,25 +131,8 @@ async function statusError(
     service: 'Grants.gov',
     // Every 5xx, 504 included, is the contract's ServiceUnavailable (the helper's default maps 504 to Timeout).
     codeOverride: (status) => (status >= 500 ? JsonRpcErrorCode.ServiceUnavailable : undefined),
-    ...(reason && { data: { reason, ...ctx.recoveryFor(reason) } }),
+    ...(reason && { data: { reason } }),
   });
-}
-
-/**
- * Re-issues a shared-build failure with this caller's recovery hint. The
- * reference build runs once for every concurrent caller, so the error it raised
- * carries the hint of whichever tool started it.
- */
-function withCallerRecovery(err: unknown, ctx: Context): unknown {
-  const reason = err instanceof McpError ? err.data?.reason : undefined;
-  if (!(err instanceof McpError) || typeof reason !== 'string') return err;
-  const { recovery: _startersRecovery, ...data } = err.data ?? {};
-  return new McpError(
-    err.code,
-    err.message,
-    { ...data, ...ctx.recoveryFor(reason) },
-    { cause: err.cause },
-  );
 }
 
 /**
@@ -163,34 +140,32 @@ function withCallerRecovery(err: unknown, ctx: Context): unknown {
  * HTML body, a non-zero `errorcode`, or a missing `data` object is a transient
  * upstream failure.
  */
-function parseEnvelope(text: string, endpoint: Endpoint, ctx: Context): Record<string, unknown> {
+function parseEnvelope(text: string, endpoint: Endpoint): Record<string, unknown> {
   if (/^\s*</.test(text))
-    throw upstreamUnavailable(`Grants.gov ${endpoint} returned HTML instead of JSON.`, ctx);
+    throw upstreamUnavailable(`Grants.gov ${endpoint} returned HTML instead of JSON.`);
   let envelope: unknown;
   try {
     envelope = JSON.parse(text);
   } catch (err) {
     throw upstreamUnavailable(
       `Grants.gov ${endpoint} returned a body that is not valid JSON.`,
-      ctx,
       err,
     );
   }
   if (!isRecord(envelope))
-    throw upstreamUnavailable(`Grants.gov ${endpoint} returned an unexpected body.`, ctx);
+    throw upstreamUnavailable(`Grants.gov ${endpoint} returned an unexpected body.`);
   if (envelope.errorcode !== 0) {
     throw upstreamUnavailable(
       `Grants.gov ${endpoint} reported error code ${excerpt(envelope.errorcode)}: ${excerpt(envelope.msg ?? 'no message')}.`,
-      ctx,
     );
   }
   if (!isRecord(envelope.data))
-    throw upstreamUnavailable(`Grants.gov ${endpoint} returned no data object.`, ctx);
+    throw upstreamUnavailable(`Grants.gov ${endpoint} returned no data object.`);
   return envelope.data;
 }
 
-function toSearchResult(text: string, ctx: Context): SearchResult {
-  const data = parseEnvelope(text, 'search2', ctx);
+function toSearchResult(text: string): SearchResult {
+  const data = parseEnvelope(text, 'search2');
   const {
     hitCount,
     oppHits,
@@ -201,7 +176,7 @@ function toSearchResult(text: string, ctx: Context): SearchResult {
     agencies,
   } = data as RawSearchData;
   if (typeof hitCount !== 'number')
-    throw upstreamUnavailable('Grants.gov search2 returned no hit count.', ctx);
+    throw upstreamUnavailable('Grants.gov search2 returned no hit count.');
   const facets: RawFacets = {
     oppStatusOptions,
     eligibilities,
@@ -212,13 +187,12 @@ function toSearchResult(text: string, ctx: Context): SearchResult {
   return { hitCount, hits: oppHits ?? [], facets };
 }
 
-function toFetchResult(status: number, text: string, ctx: Context): FetchResult {
+function toFetchResult(status: number, text: string): FetchResult {
   if (status === 404) return { kind: 'not_found' };
-  const data = parseEnvelope(text, 'fetchOpportunity', ctx);
+  const data = parseEnvelope(text, 'fetchOpportunity');
   if (typeof data.message === 'string' && /not available/i.test(data.message)) {
     throw upstreamUnavailable(
       `Grants.gov fetchOpportunity backend is unavailable: ${excerpt(data.message)}`,
-      ctx,
     );
   }
   if (typeof data.id === 'number') {
@@ -230,7 +204,6 @@ function toFetchResult(status: number, text: string, ctx: Context): FetchResult 
     return { kind: 'not_found' };
   throw upstreamUnavailable(
     'Grants.gov fetchOpportunity returned neither a record nor a not-found message.',
-    ctx,
   );
 }
 
@@ -244,17 +217,12 @@ export class GrantsGovService {
 
   /** One `search2` call. */
   search(body: Search2Body, ctx: Context): Promise<SearchResult> {
-    return this.post('search2', body, (_status, text) => toSearchResult(text, ctx), ctx);
+    return this.post('search2', body, (_status, text) => toSearchResult(text), ctx);
   }
 
   /** One `fetchOpportunity` call, revision history stripped. A miss is `not_found`, never thrown. */
   fetchOpportunity(opportunityId: number, ctx: Context): Promise<FetchResult> {
-    return this.post(
-      'fetchOpportunity',
-      { opportunityId },
-      (status, text) => toFetchResult(status, text, ctx),
-      ctx,
-    );
+    return this.post('fetchOpportunity', { opportunityId }, toFetchResult, ctx);
   }
 
   /**
@@ -341,8 +309,8 @@ export class GrantsGovService {
    * The reference snapshot, cached in-process for 24 h behind one in-flight
    * build. A failed refresh serves the previous snapshot when one exists, and
    * keeps serving it without re-contacting Grants.gov for a minute after the
-   * failure. A failure with no snapshot to fall back on throws, carrying this
-   * caller's recovery hint.
+   * failure. A failure with no snapshot to fall back on throws to every waiting
+   * caller; each tool's contract fills its own recovery hint from the reason.
    */
   async getReference(ctx: Context): Promise<ReferenceSnapshot> {
     const cached = this.reference;
@@ -356,7 +324,7 @@ export class GrantsGovService {
     try {
       return await this.referenceInflight;
     } catch (err) {
-      if (!cached) throw withCallerRecovery(err, ctx);
+      if (!cached) throw err;
       this.refreshBlockedUntilMs = Date.now() + REFRESH_FAILURE_BACKOFF_MS;
       ctx.log.warning('Grants.gov reference refresh failed; serving the previous snapshot', {
         snapshotDate: cached.snapshot.fetchedAt,
@@ -378,7 +346,7 @@ export class GrantsGovService {
    */
   private async buildReference(ctx: Context): Promise<ReferenceSnapshot> {
     const facetsOnly = (body: Search2Body) =>
-      this.post('search2', body, (_status, text) => toSearchResult(text, ctx), ctx, {
+      this.post('search2', body, (_status, text) => toSearchResult(text), ctx, {
         detached: true,
       });
     const [all, open] = await Promise.all([
@@ -410,7 +378,7 @@ export class GrantsGovService {
     return withRetry(
       (attempt) =>
         this.pacer.run(
-          (signal) => this.attempt(endpoint, body, classify, ctx, signal, attempt.remainingMs),
+          (signal) => this.attempt(endpoint, body, classify, signal, attempt.remainingMs),
           {
             signal: attempt.signal,
           },
@@ -431,7 +399,6 @@ export class GrantsGovService {
     endpoint: Endpoint,
     body: Search2Body | { opportunityId: number },
     classify: (status: number, text: string) => T,
-    ctx: Context,
     signal: AbortSignal,
     remainingMs: number,
   ): Promise<T> {
@@ -440,10 +407,7 @@ export class GrantsGovService {
     const timer = setTimeout(
       () =>
         perAttempt.abort(
-          upstreamUnavailable(
-            `Grants.gov ${endpoint} did not respond within ${timeoutMs} ms.`,
-            ctx,
-          ),
+          upstreamUnavailable(`Grants.gov ${endpoint} did not respond within ${timeoutMs} ms.`),
         ),
       timeoutMs,
     );
@@ -454,7 +418,6 @@ export class GrantsGovService {
           ? (combined.reason ?? err)
           : upstreamUnavailable(
               `Could not reach Grants.gov ${endpoint}: ${excerpt(err instanceof Error ? err.message : err)}`,
-              ctx,
               err,
             );
       });
@@ -469,7 +432,7 @@ export class GrantsGovService {
         }),
       );
       if (!ACCEPTED_STATUSES[endpoint].has(response.status))
-        throw await statusError(response, endpoint, ctx);
+        throw await statusError(response, endpoint);
       const text = await network(response.text());
       return classify(response.status, text);
     } finally {

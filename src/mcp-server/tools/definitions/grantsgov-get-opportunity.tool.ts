@@ -865,17 +865,12 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
         numbers.push(number);
     }
     if (ids.length === 0 && numbers.length === 0) {
-      throw ctx.fail(
-        'no_identifiers',
-        'Pass at least one opportunity id or opportunity number.',
-        ctx.recoveryFor('no_identifiers'),
-      );
+      throw ctx.fail('no_identifiers', 'Pass at least one opportunity id or opportunity number.');
     }
     if (ids.length + numbers.length > MAX_IDENTIFIERS) {
       throw ctx.fail(
         'too_many_identifiers',
         `${ids.length + numbers.length} opportunities were requested; the limit is ${MAX_IDENTIFIERS} per call.`,
-        ctx.recoveryFor('too_many_identifiers'),
       );
     }
 

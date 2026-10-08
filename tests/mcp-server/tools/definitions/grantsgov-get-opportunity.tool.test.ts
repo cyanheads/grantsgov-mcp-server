@@ -46,7 +46,7 @@ import {
   DETAIL_FORECAST,
   DETAIL_NSF,
 } from '../../../fixtures/grants-gov-records.js';
-import { drained, rejectionOf } from '../../../fixtures/harness.js';
+import { contractFailure, drained } from '../../../fixtures/harness.js';
 
 const tool = grantsgovGetOpportunity;
 type Input = Parameters<typeof tool.input.parse>[0];
@@ -115,13 +115,11 @@ async function recordOf(raw: { id: number } & Record<string, unknown>): Promise<
   return record;
 }
 
-const failure = (raw: Input) =>
-  rejectionOf(() =>
-    tool.handler(tool.input.parse(raw), createMockContext({ errors: tool.errors })),
-  );
+/** The error envelope a client receives, recovery hint filled. */
+const failure = (raw: Record<string, unknown>) => contractFailure(tool, raw);
 
 /** {@link failure} with retry backoff drained. */
-const drainedFailure = (raw: Input) => drained(() => failure(raw));
+const drainedFailure = (raw: Record<string, unknown>) => drained(() => failure(raw));
 
 const today = todayET();
 const numberNotFoundGuidance = (number: string) =>

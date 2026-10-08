@@ -336,7 +336,6 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
       throw ctx.fail(
         'filter_not_applicable',
         `parent_code applies only to topic agencies, not ${topic}.`,
-        ctx.recoveryFor('filter_not_applicable'),
       );
     }
 
@@ -359,10 +358,7 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
           throw ctx.fail(
             'unknown_parent_code',
             `No agency code "${parentCode}" in the Grants.gov vocabulary.`,
-            {
-              parentCode,
-              ...ctx.recoveryFor('unknown_parent_code'),
-            },
+            { parentCode },
           );
         }
         const codes = scope.kind === 'code' ? scope.node.descendants : scope.codes;
