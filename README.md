@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/grantsgov-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/grantsgov-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/grantsgov-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/grantsgov-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/grantsgov-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/grantsgov-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -19,11 +19,17 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://grantsgov.caseyjhand.com/mcp](https://grantsgov.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Overview
 
-US federal funding opportunities from Grants.gov, covering every agency's forecasted, posted, closed, and archived notices. Search by keyword, agency, applicant type, funding category, assistance listing, or deadline window, then read a full record: award range, eligibility, key dates, agency contact, and NOFO attachments. The Grants.gov API is keyless, so there is nothing to configure; the server runs as a stdio process or a local Streamable HTTP server.
+US federal funding opportunities from Grants.gov, covering every agency's forecasted, posted, closed, and archived notices. Search by keyword, agency, applicant type, funding category, assistance listing, or deadline window, then read a full record: award range, eligibility, key dates, agency contact, and NOFO attachments. The Grants.gov API is keyless, so there is nothing to configure; the server runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
@@ -82,6 +88,23 @@ Agent-friendly output:
 - Typed failure reasons with recovery hints, including `upstream_unavailable`, `rate_limited`, and `upstream_route_unavailable` for Grants.gov outages
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://grantsgov.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "grantsgov-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://grantsgov.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file. No API key is needed.
 
@@ -180,7 +203,7 @@ The server reads no configuration of its own: the Grants.gov API is keyless and 
 |:---|:---|:---|
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
-| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. `.env.example` and the Docker image set `stateless`. | `auto` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. The server declares `stateless`; set this only to override it. | `stateless` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<app-root>/logs` |
