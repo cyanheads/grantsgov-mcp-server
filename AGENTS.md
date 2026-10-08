@@ -2,7 +2,7 @@
 
 **Server:** grantsgov-mcp-server (npm `@cyanheads/grantsgov-mcp-server`)
 **Version:** 0.1.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.14`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **Upstream:** Grants.gov legacy REST API (`https://api.grants.gov/v1/api`: `POST search2`, `POST fetchOpportunity`) — keyless, no env config
 
@@ -55,8 +55,8 @@ No resources, no prompts, no DataCanvas — every record is reachable through `g
 
 - **Transport:** plain `fetch` with a per-endpoint status accept-list (`search2` {200}; `fetchOpportunity` {200, 404}). A non-accepted status is never parsed as data: 403 → `upstream_route_unavailable` (non-retryable — the legacy route is gone), 5xx → `upstream_unavailable`, 429 → `rate_limited`. A 200 with HTML, bad JSON, `errorcode !== 0`, or a "not available" message is `upstream_unavailable`.
 - **Resilience:** `withRetry` (2 retries, 25 s deadline) outside, the process-wide pacer (`maxConcurrent: 4`) inside, so each attempt re-queues. Per-attempt timeout 15 s.
-- **Reason propagation:** every service throw carries `data.reason` plus the calling tool's `ctx.recoveryFor(reason)`. Each tool declares `upstream_unavailable`, `rate_limited`, and `upstream_route_unavailable` with `thrownBy: 'service'`, each with its own tool-named recovery text.
-- **Reference snapshot:** process-local (public vocabulary, not tenant data — never `ctx.state`), 24 h TTL, one in-flight build shared by concurrent callers. A failed refresh serves the stale snapshot and blocks retries for 60 s; a failure with no snapshot is re-issued to each caller with its own recovery hint.
+- **Reason propagation:** every service throw carries `data.reason` and no recovery hint; the framework fills the calling tool's declared hint for that reason. Each tool declares `upstream_unavailable`, `rate_limited`, and `upstream_route_unavailable` with `thrownBy: 'service'`, each with its own tool-named recovery text.
+- **Reference snapshot:** process-local (public vocabulary, not tenant data — never `ctx.state`), 24 h TTL, one in-flight build shared by concurrent callers. A failed refresh serves the stale snapshot and blocks retries for 60 s; a failure with no snapshot reaches every waiting caller, and each tool's contract fills its own recovery hint.
 - **`Search2Body` is a closed interface.** Grants.gov ignores unknown keys and silently widens to the default scope, so no caller input is ever spread into a body. A new filter means a new typed key, probed first.
 
 ### Upstream traps the tools close
@@ -154,7 +154,6 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
       if (!scope) {
         throw ctx.fail('unknown_parent_code', `No agency code "${parentCode}" in the Grants.gov vocabulary.`, {
           parentCode,
-          ...ctx.recoveryFor('unknown_parent_code'),
         });
       }
     }
@@ -171,6 +170,12 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
 
 `src/index.ts` sets `name` and `title` to the unscoped repo name (`lint:packaging` enforces the match), registers `allToolDefinitions`, and carries the server `instructions` string from the design doc. `description` is never set there — `package.json` is the canonical source.
 
+### Session posture and shutdown
+
+`src/index.ts` declares `sessionMode: 'stateless'`: no tool asks the caller for input mid-handler, and a stateless data API needs no session store. `sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Add `require: 'stateful'` when a tool asks the caller for input mid-handler via `ctx.requestInput`: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
+
+`teardown(core)` is the `setup()` counterpart — here it disposes the service, whose pacer holds a timer. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
+
 ### Server config
 
 None. The API is keyless and the base URL is a constant in the service, so there is no `src/config/server-config.ts`. Adding an env var means creating it (`parseEnvConfig` + Zod, see the framework docs) and declaring the variable in `server.json`, `manifest.json` (`mcp_config.env` + `user_config`), `.claude-plugin/plugin.json` (`userConfig` + `env`), `.codex-plugin/mcp.json` (`env_vars`), `.env.example`, and the README Configuration table.
@@ -185,8 +190,7 @@ Handlers receive a unified `ctx` object. This server uses:
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
 | `ctx.enrich` | Success-path agent context — `ctx.enrich({...})` or `.notice()` / `.total()` / `.truncated()`. Lands only for fields the definition declares in `enrichment`. Search uses it for `totalCount`, `next_offset`, `effective_keyword`, `applied_filters`, and zero-hit notices. |
-| `ctx.fail(reason, …)` | Throws a typed contract error for a declared reason. |
-| `ctx.recoveryFor(reason)` | Returns `{ recovery: { hint } }` for a declared reason — spread into `ctx.fail` data, and passed by the service into its own throws. |
+| `ctx.fail(reason, …)` | Throws a typed contract error for a declared reason; the framework fills the entry's recovery hint unless the throw passes its own. |
 | `ctx.signal` | `AbortSignal` for cancellation — threaded into `withRetry`; the closing-window scan checks it between pages. |
 
 ---
@@ -195,13 +199,13 @@ Handlers receive a unified `ctx` object. This server uses:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Typed error contract on every tool.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` and throw with `ctx.fail(reason, message, data)`. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. Forward it with `ctx.recoveryFor('reason')`, or pass an explicit `{ recovery: { hint } }` when runtime context sharpens it (the search tool names the unknown agency code in its hint). Forwarding is lint-enforced per throw site (`error-contract-recovery-unforwarded`). Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
+**Typed error contract on every tool.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` and throw with `ctx.fail(reason, message, data)`. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint } }` when runtime context sharpens it (the search tool names the unknown agency code in its hint, and passes the keyword compiler's own hint for an ambiguous or field-prefixed keyword). Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with `(reason … · request <id>)`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
 
 **Declare contracts inline on each tool.** The contract is part of the tool's public surface — one file should give the full picture. Don't extract a shared `errors[]` constant; per-tool repetition is the intended cost of locality.
 
 **Misses are results, outages are errors.** An unresolved id or number is an `unresolved[]` entry with guidance; a zero-hit search is an empty page with a notice. Only invalid input and upstream failure throw.
 
-**Service-layer throws** use factories (`serviceUnavailable`, `httpErrorFromResponse`) with `data: { reason, ...ctx.recoveryFor(reason) }`, so clients see the same `error.data.reason` they'd see from `ctx.fail`.
+**Service-layer throws** use factories (`serviceUnavailable`, `httpErrorFromResponse`) with `data: { reason }`, so clients see the same `error.data.reason` and recovery hint they'd see from `ctx.fail` — the calling tool's contract supplies the hint.
 
 See framework CLAUDE.md and the `api-errors` skill for the full auto-classification table, all factories, and the contract reference.
 
@@ -362,7 +366,7 @@ security: false                            # optional — true ONLY for a source
 
 ## Publishing
 
-**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the changelog entry plus a gates section); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
+**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the release digest: theme line, `## Changes`, `## Gates`, changelog link last); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
 
 ---
 
