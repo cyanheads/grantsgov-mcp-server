@@ -76,10 +76,57 @@ describe('optionalList', () => {
     expect(() => schema.parse({ codes: ['12', '07', '99'] })).toThrow();
   });
 
-  it('still validates each kept element and rejects a non-array', () => {
-    expect(() => schema.parse({ codes: ['7'] })).toThrow();
-    expect(() => schema.parse({ codes: '12' })).toThrow();
+  it('preserves valid identifier and filter arrays padded with blank entries', () => {
+    const blanks = Array.from({ length: 51 }, () => ' ');
+    expect(
+      grantsgovGetOpportunity.input.parse({ opportunity_ids: [344001, ...blanks] }),
+    ).toMatchObject({ opportunity_ids: [344001] });
+    expect(
+      grantsgovSearchOpportunities.input.parse({ statuses: ['posted', ...blanks] }),
+    ).toMatchObject({ statuses: ['posted'] });
   });
+
+  it('still validates each kept element and rejects a numeric scalar', () => {
+    expect(() => schema.parse({ codes: ['7'] })).toThrow();
+    expect(() => schema.parse({ codes: 12 })).toThrow();
+  });
+
+  it('accepts a whole singleton string and blanks without splitting', () => {
+    expect(schema.parse({ codes: ' 12 ' })).toEqual({ codes: ['12'] });
+    expect(schema.parse({ codes: ' ' })).toEqual({ codes: undefined });
+    expect(() => schema.parse({ codes: '12,07' })).toThrow();
+  });
+});
+
+describe('blank list CPU scaling', () => {
+  it.each(['terminal', 'throughout'])(
+    'bounds advertised blank matching with %s breaks',
+    (shape) => {
+      const schemas = [grantsgovGetOpportunity.input, grantsgovSearchOpportunities.input];
+      const sources = [...new Set(schemas.flatMap((schema) => patternsIn(advertised(schema))))];
+      expect(sources).toContain('^\\s*$');
+      const pattern = new RegExp(sources.find((source) => source === '^\\s*$')!);
+      let baseline = 0;
+      for (let size = 5000; size <= 320000; size *= 2) {
+        const value =
+          shape === 'terminal' ? `${' '.repeat(size)}\nx` : `${' \n'.repeat(size / 2)}x`;
+        let elapsed = 0;
+        let count = 0;
+        const start = process.threadCpuUsage();
+        do {
+          expect(pattern.test(value)).toBe(false);
+          count++;
+          const cpu = process.threadCpuUsage(start);
+          elapsed = cpu.user + cpu.system;
+          expect(elapsed).toBeLessThan(1_000_000);
+        } while (elapsed < 20_000 && count < 16384);
+        expect(elapsed).toBeGreaterThan(0);
+        const mean = elapsed / count;
+        if (size === 5000) baseline = mean;
+        else expect(mean / baseline).toBeLessThan(256);
+      }
+    },
+  );
 });
 
 describe('AGENCY_CODE', () => {
@@ -199,6 +246,54 @@ describe('advertised input schemas admit every raw form the descriptions promise
   const search = advertised(grantsgovSearchOpportunities.input);
   const get = advertised(grantsgovGetOpportunity.input);
   const reference = advertised(grantsgovListReference.input);
+
+  it.each([
+    ['statuses', ' POSTED ', ['posted']],
+    ['agencies', ' hhs ', ['HHS']],
+    ['eligibilities', '7', ['07']],
+    ['funding_categories', 'hl', ['HL']],
+    ['funding_instruments', 'g', ['G']],
+  ])('normalizes singleton search %s exactly like an array', (field, value, normalized) => {
+    expect(admits(search.properties[field] as JsonSchema, value)).toBe(true);
+    expect(grantsgovSearchOpportunities.input.parse({ [field]: value })).toMatchObject({
+      [field]: normalized,
+    });
+    expect(grantsgovSearchOpportunities.input.parse({ [field]: value })).toEqual(
+      grantsgovSearchOpportunities.input.parse({ [field]: [value] }),
+    );
+    expect(grantsgovSearchOpportunities.input.safeParse({ [field]: 7 }).success).toBe(false);
+    expect(grantsgovSearchOpportunities.input.safeParse({ [field]: [value, {}] }).success).toBe(
+      false,
+    );
+    const padded = [...normalized, ...Array(60).fill(' ')];
+    expect(admits(search.properties[field] as JsonSchema, padded)).toBe(true);
+    expect(grantsgovSearchOpportunities.input.parse({ [field]: padded })).toMatchObject({
+      [field]: normalized,
+    });
+  });
+
+  it.each([
+    ['opportunity_ids', '344001', [344001]],
+    ['opportunity_numbers', ' "PAS-TUNIS- APS FY2026" ', ['PAS-TUNIS- APS FY2026']],
+  ])(
+    'normalizes singleton detail %s and advertises no raw maxItems',
+    (field, value, normalized) => {
+      const property = get.properties[field] as JsonSchema;
+      expect(admits(property, value)).toBe(true);
+      expect(grantsgovGetOpportunity.input.parse({ [field]: value })).toEqual({
+        [field]: normalized,
+      });
+      expect(JSON.stringify(property)).not.toContain('maxItems');
+      expect(
+        grantsgovGetOpportunity.input.safeParse({ [field]: [value, ...Array(60).fill(' ')] })
+          .success,
+      ).toBe(true);
+      expect(
+        grantsgovGetOpportunity.input.safeParse({ [field]: Array(51).fill(value) }).success,
+      ).toBe(false);
+      expect(grantsgovGetOpportunity.input.safeParse({ [field]: 7 }).success).toBe(false);
+    },
+  );
 
   it.each([
     ['agencies', [['hhs-nih11', ' HHS ', 'dot-faa-faa coe', 'NSF']]],
@@ -332,8 +427,9 @@ describe('linear patterns accept the same strings as their straightforward spell
       'opportunity number',
       /^\s*(?:"[^"]*"|[^"]*)?\s*$/,
       new RegExp(
-        (advertised(grantsgovGetOpportunity.input).properties.opportunity_numbers?.items
-          ?.pattern as string) ?? '',
+        (advertised(grantsgovGetOpportunity.input).properties.opportunity_numbers?.anyOf?.find(
+          (branch) => branch.type === 'array',
+        )?.items?.anyOf?.[0]?.pattern as string) ?? '',
       ),
     ],
     ['eligibility', /^\s*(?:\d{1,2})?\s*$/, rawPattern('\\d{1,2}')],

@@ -99,6 +99,7 @@ export interface RawDetailBlock {
   fundingDescLinkUrl?: string | null;
   fundingInstruments?: RawCodeDescription[] | null;
   lastUpdatedDate?: string | null;
+  modComments?: string | null;
   numberOfAwards?: string | number | null;
   postingDateStr?: string | null;
   responseDateDesc?: string | null;
@@ -108,6 +109,7 @@ export interface RawDetailBlock {
 
 /** A NOFO attachment inside a `synopsisAttachmentFolders[]` entry. */
 export interface RawAttachment {
+  createdDate?: string | null;
   fileDescription?: string | null;
   fileLobSize?: number | null;
   fileName?: string | null;
@@ -148,6 +150,7 @@ export interface RawDetail {
   docType?: string | null;
   forecast?: RawDetailBlock | null;
   forecastHistCount?: number | null;
+  forecastModifiedFields?: string[] | null;
   id?: number | null;
   opportunityCategory?: { category?: string | null; description?: string | null } | null;
   opportunityNumber?: string | null;
@@ -162,6 +165,7 @@ export interface RawDetail {
     | { folderType?: string | null; synopsisAttachments?: RawAttachment[] | null }[]
     | null;
   synopsisHistCount?: number | null;
+  synopsisModifiedFields?: string[] | null;
   topAgencyDetails?: { agencyCode?: string | null; agencyName?: string | null } | null;
 }
 

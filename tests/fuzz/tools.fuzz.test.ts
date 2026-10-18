@@ -8,12 +8,16 @@
 
 import { createFetchMock, type FetchMockHarness } from '@cyanheads/mcp-ts-core/testing';
 import { fuzzTool } from '@cyanheads/mcp-ts-core/testing/fuzz';
+import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { grantsgovGetOpportunity } from '@/mcp-server/tools/definitions/grantsgov-get-opportunity.tool.js';
 import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import {
   getGrantsGovService,
   initGrantsGovService,
 } from '@/services/grants-gov/grants-gov-service.js';
+import { htmlToText } from '@/services/grants-gov/html-to-text.js';
+import { decodeEntities } from '@/services/grants-gov/normalize.js';
 import {
   bodyOf,
   DETAIL_HRSA,
@@ -27,6 +31,46 @@ import {
 } from '../fixtures/grants-gov.js';
 
 let http: FetchMockHarness;
+
+it('normalizes numeric spellings without dropping queue entries', () => {
+  fc.assert(
+    fc.property(
+      fc.array(fc.integer({ min: 1, max: 50 }), { minLength: 1, maxLength: 50 }),
+      (ids) => {
+        const values = ids.map((id, index) => (index % 2 ? String(id) : id));
+        const parsed = grantsgovGetOpportunity.input.parse({ opportunity_ids: values });
+        expect(parsed.opportunity_ids).toEqual(ids);
+      },
+    ),
+    { numRuns: 100, seed: 20261018 },
+  );
+});
+
+it('preserves ordinary text and bounded entities inside nested narrative markup', () => {
+  fc.assert(
+    fc.property(
+      fc.array(
+        fc.constantFrom(
+          'word',
+          '&sect;',
+          '&Aacute;',
+          '&aacute;',
+          '&constructor;',
+          '<reference>',
+          'x < y',
+        ),
+        { minLength: 1, maxLength: 100 },
+      ),
+      fc.integer({ min: 1, max: 30 }),
+      (parts, depth) => {
+        const body = parts.join(' ');
+        const input = `${'<div><span>'.repeat(depth)}${body}${'</span></div>'.repeat(depth)}`;
+        expect(htmlToText(input)).toBe(decodeEntities(body));
+      },
+    ),
+    { numRuns: 100, seed: 20261018 },
+  );
+});
 
 beforeEach(() => {
   http = createFetchMock();

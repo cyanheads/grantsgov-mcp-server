@@ -17,13 +17,21 @@ export const blankToUndefined = (value: unknown): unknown =>
 export const optionalText = <T extends z.ZodType>(schema: T) =>
   z.preprocess(blankToUndefined, schema.optional());
 
-/** An optional list input: blank elements are dropped, and a list left empty reads as unset. */
+/** A whole string or list; drop blanks before bounding and validating the remaining members. */
 export const optionalList = <T extends z.ZodType>(item: T, max: number) =>
-  z.preprocess((value) => {
-    if (!Array.isArray(value)) return value;
-    const kept = value.map(blankToUndefined).filter((x) => x !== undefined);
-    return kept.length === 0 ? undefined : kept;
-  }, z.array(item).max(max).optional());
+  z
+    .preprocess((value) => {
+      if (typeof value === 'string') value = [value];
+      if (!Array.isArray(value)) return value;
+      const kept = value.map(blankToUndefined).filter((x) => x !== undefined);
+      return kept.length === 0 ? undefined : kept;
+    }, z.union([z.string(), z.array(z.union([item, z.string().regex(/^\s*$/)]))]).optional())
+    .pipe(
+      z.preprocess(
+        (value) => value,
+        z.array(item).max(max, `Pass at most ${max} nonblank entries.`).optional(),
+      ),
+    );
 
 /**
  * Preprocess for number inputs: blank reads as unset, and a digit string (`"30"`)

@@ -4,6 +4,7 @@
  * @module tests/smoke/definitions.smoke.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { grantsgovGetOpportunity } from '@/mcp-server/tools/definitions/grantsgov-get-opportunity.tool.js';
@@ -12,6 +13,25 @@ import { grantsgovSearchOpportunities } from '@/mcp-server/tools/definitions/gra
 import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 
 describe('definition smoke test', () => {
+  it('advertises string-or-array lists and the search acceptance ceiling', () => {
+    for (const [definition, fields] of [
+      [
+        grantsgovSearchOpportunities,
+        ['statuses', 'agencies', 'eligibilities', 'funding_categories', 'funding_instruments'],
+      ],
+      [grantsgovGetOpportunity, ['opportunity_ids', 'opportunity_numbers']],
+    ] as const) {
+      const json = z.toJSONSchema(definition.input, { io: 'input' });
+      for (const name of fields) {
+        const property = json.properties?.[name];
+        expect(JSON.stringify(property)).toContain('"type":"string"');
+        expect(JSON.stringify(property)).toContain('"type":"array"');
+        expect(JSON.stringify(property)).not.toContain('maxItems');
+      }
+    }
+    expect(grantsgovSearchOpportunities.input.parse({ limit: 1000 }).limit).toBe(1000);
+    expect(grantsgovSearchOpportunities.input.safeParse({ limit: 1001 }).success).toBe(false);
+  });
   it('registers every tool through the barrel', () => {
     expect(allToolDefinitions.map((definition) => definition.name)).toEqual([
       'grantsgov_search_opportunities',
@@ -42,6 +62,20 @@ describe('definition smoke test', () => {
 
     await expect(grantsgovGetOpportunity.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_identifiers' },
+    });
+  });
+
+  it('accepts independent bounded-detail continuation arguments', () => {
+    expect(
+      grantsgovGetOpportunity.input.parse({
+        opportunity_ids: [347858],
+        attachment_offset: 30,
+        description_offset: 12_000,
+      }),
+    ).toMatchObject({
+      opportunity_ids: [347858],
+      attachment_offset: 30,
+      description_offset: 12_000,
     });
   });
 

@@ -9,6 +9,21 @@ import { describe, expect, it } from 'vitest';
 import { htmlToText } from '@/services/grants-gov/html-to-text.js';
 
 describe('htmlToText — HTML input', () => {
+  it('keeps visible text between alternate and standard comment terminators', () => {
+    expect(htmlToText('A<!-- note --!>B<!-- end -->C<!-- open')).toBe('ABC<!-- open');
+  });
+
+  it('converts encoded lists and links and discards a terminal recognized tag', () => {
+    expect(
+      htmlToText(
+        '&amp;lt;ul&amp;gt;&lt;li&gt;&lt;a href="https://example.gov"&gt;Apply&lt;/a&gt;&lt;/li&gt;&lt;/ul&gt;',
+      ),
+    ).toBe('- Apply (https://example.gov)');
+    expect(htmlToText('Visible <span class="TextRun" d')).toBe('Visible');
+    expect(htmlToText('x < y; Awards < $500; <reference>')).toBe(
+      'x < y; Awards < $500; <reference>',
+    );
+  });
   it('turns p and div into paragraph breaks', () => {
     expect(htmlToText('<p>One</p><p>Two</p>')).toBe('One\n\nTwo');
     expect(htmlToText('<div>One</div><div>Two</div>')).toBe('One\n\nTwo');
@@ -52,6 +67,18 @@ describe('htmlToText — HTML input', () => {
     );
   });
 
+  it('pairs nested anchors with their own text and destination', () => {
+    expect(htmlToText('<a href="outer">A<a href="inner">B</a>C</a>')).toBe('AB (inner)C (outer)');
+    expect(htmlToText('<a href="outer"><a href="inner">inner</a></a>')).toBe('inner (outer)');
+    expect(htmlToText('<a href="AB">A<a>B</a></a>')).toBe('AB');
+  });
+
+  it('avoids repeating a destination surrounded by source whitespace', () => {
+    expect(htmlToText('<a href="https://example.gov">  https://example.gov  </a>')).toBe(
+      '  https://example.gov',
+    );
+  });
+
   it('does not repeat a URL that is already the link text', () => {
     expect(htmlToText('<a href="https://www.grants.gov">https://www.grants.gov</a>')).toBe(
       'https://www.grants.gov',
@@ -76,8 +103,8 @@ describe('htmlToText — HTML input', () => {
     ).toBe('Text.');
   });
 
-  it('decodes entities after tags are removed, so encoded markup stays text', () => {
-    expect(htmlToText('&lt;b&gt;not bold&lt;/b&gt;')).toBe('<b>not bold</b>');
+  it('decodes entities before converting markup', () => {
+    expect(htmlToText('&lt;b&gt;not bold&lt;/b&gt;')).toBe('not bold');
   });
 
   it('leaves a literal < that does not start a tag', () => {
@@ -118,6 +145,47 @@ describe('htmlToText — plain-text input', () => {
 });
 
 describe('htmlToText — malformed and hostile markup', () => {
+  it.each([
+    ['openers', '<a', false],
+    ['nested openers', '<a', true],
+    ['comments', '<!--', false],
+    ['anchors', '<a href="u">', true],
+    ['spaced anchors', '<a href="u"> ', true],
+    ['entities', '&amp;amp;', false],
+    ['overlapping names', '&NotEqualTilde', false],
+  ] as const)('text CPU scaling: %s', { timeout: 30_000 }, (_name, token, closed) => {
+    for (const breaks of [false, true]) {
+      const make = (size: number) => {
+        const part = breaks ? `${token}\n` : token;
+        const count = Math.ceil(size / part.length);
+        return `${part.repeat(count)}${closed ? '</a>'.repeat(count) : ''}\n`;
+      };
+      const measure = (input: string) => {
+        const started = process.threadCpuUsage();
+        let elapsed = 0;
+        let count = 0;
+        let result = '';
+        do {
+          result = htmlToText(input);
+          count++;
+          const cpu = process.threadCpuUsage(started);
+          elapsed = cpu.user + cpu.system;
+          expect(elapsed).toBeLessThan(1_000_000);
+        } while (elapsed < 20_000 && count < 16384);
+        expect(elapsed).toBeGreaterThan(0);
+        expect(result.length).toBeLessThanOrEqual(input.length * 2);
+        return elapsed / count;
+      };
+      measure(make(5_000));
+      const baseline = measure(make(5_000));
+      for (let size = 10_000; size <= 320_000; size *= 2) {
+        const elapsed = measure(make(size));
+        expect(elapsed).toBeLessThan(1_000_000);
+        expect(elapsed / baseline).toBeLessThan(256);
+      }
+    }
+  });
+
   it('keeps the text of an unterminated comment, script, or style', () => {
     expect(htmlToText('Before <!-- never closed')).toBe('Before <!-- never closed');
     expect(htmlToText('<!-- a -->Kept<!-- open')).toBe('Kept<!-- open');
@@ -130,7 +198,7 @@ describe('htmlToText — malformed and hostile markup', () => {
   });
 
   it('strips a tag that follows an unclosed one', () => {
-    expect(htmlToText('<a <b>bold</b>')).toBe('<a bold');
+    expect(htmlToText('<a <b>bold</b>')).toBe('bold');
   });
 
   it('caps list indentation, so deep nesting cannot multiply the output', () => {

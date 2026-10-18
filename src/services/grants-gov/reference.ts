@@ -5,6 +5,7 @@
  * @module services/grants-gov/reference
  */
 
+import { decodeEntities } from './normalize.js';
 import type {
   AgencyNode,
   RawFacetOption,
@@ -63,7 +64,7 @@ function vocabulary(
     seen.add(code);
     entries.push({
       code,
-      label: trimmed(option.label) || code,
+      label: decodeEntities(trimmed(option.label) || code),
       openCount: openCounts.get(code) ?? 0,
       totalCount: option.count ?? 0,
     });
@@ -97,7 +98,7 @@ export function buildReferenceSnapshot(
   for (const top of all.agencies ?? []) {
     const topCode = trimmed(top.value);
     if (!topCode || labels.has(topCode)) continue;
-    labels.set(topCode, trimmed(top.label) || topCode);
+    labels.set(topCode, decodeEntities(trimmed(top.label) || topCode));
     topLevelAgencies.push(topCode);
   }
   for (const top of all.agencies ?? []) {
@@ -106,7 +107,7 @@ export function buildReferenceSnapshot(
     for (const sub of top.subAgencyOptions ?? []) {
       const code = trimmed(sub.value);
       if (!code || code === topCode || labels.has(code)) continue;
-      labels.set(code, trimmed(sub.label) || code);
+      labels.set(code, decodeEntities(trimmed(sub.label) || code));
       topOf.set(code, topCode);
     }
   }
@@ -184,6 +185,45 @@ export function resolveAgencyScope(
   if (node) return { kind: 'code', node };
   const codes = [...snapshot.agencies.keys()].filter((code) => extendsCode(code, value));
   return codes.length > 0 ? { kind: 'prefix', prefix: value, codes } : undefined;
+}
+
+/** Current-query exact counts rolled up to known parents; snapshot counts are never used. */
+export function querySubAgencyFacets(facets: RawFacets, snapshot: ReferenceSnapshot) {
+  const tops = new Set((facets.agencies ?? []).map((top) => trimmed(top.value)));
+  const exact = new Map<string, { code: string; label: string; count: number }>();
+  for (const top of facets.agencies ?? []) {
+    for (const sub of top.subAgencyOptions ?? []) {
+      const code = trimmed(sub.value);
+      if (!code || tops.has(code) || exact.has(code)) continue;
+      const rawLabel = trimmed(sub.label);
+      exact.set(code, {
+        code,
+        label: rawLabel ? decodeEntities(rawLabel) : (snapshot.agencies.get(code)?.label ?? code),
+        count: sub.count ?? 0,
+      });
+    }
+  }
+  const totals = new Map<string, { code: string; label: string; count: number }>();
+  for (const entry of exact.values()) {
+    let code: string | undefined = entry.code;
+    while (code !== undefined && !tops.has(code)) {
+      const known = snapshot.agencies.get(code);
+      if (code === entry.code || entry.count > 0) {
+        const previous = totals.get(code);
+        totals.set(code, {
+          code,
+          label: exact.get(code)?.label ?? known?.label ?? code,
+          count: (previous?.count ?? 0) + entry.count,
+        });
+      }
+      code = known
+        ? known.parentCode
+        : [...snapshot.agencies.keys()]
+            .filter((candidate) => extendsCode(entry.code, candidate))
+            .sort((a, b) => b.length - a.length)[0];
+    }
+  }
+  return [...totals.values()].sort((a, b) => a.code.localeCompare(b.code));
 }
 
 const quote = (code: string) => `"${code}"`;

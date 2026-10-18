@@ -21,10 +21,64 @@ import {
   getGrantsGovService,
   initGrantsGovService,
 } from '@/services/grants-gov/grants-gov-service.js';
-import { json, referenceRoute, SEARCH2_URL } from '../../../fixtures/grants-gov.js';
+import { json, ok, referenceRoute, SEARCH2_URL, searchData } from '../../../fixtures/grants-gov.js';
 import { contractFailure, drained } from '../../../fixtures/harness.js';
 
 const tool = grantsgovListReference;
+
+describe('entity text contract', () => {
+  it('decodes labels through a nested agency tree without changing counts or codes', async () => {
+    http.route({
+      method: 'POST',
+      match: SEARCH2_URL,
+      respond: () =>
+        ok(
+          searchData([], 0, {
+            agencies: [
+              {
+                value: 'TOP',
+                label: 'Top &Aacute;',
+                count: 12,
+                subAgencyOptions: [
+                  { value: 'TOP-SUB', label: 'Sub &aacute;', count: 3 },
+                  { value: 'TOP-SUB-LEAF', label: 'Leaf &sect; <reference>', count: 2 },
+                ],
+              },
+            ],
+            eligibilities: [{ value: '99', label: 'All &eacute;', count: 12 }],
+          }),
+        ),
+    });
+    const envelope = await runToolContract(tool, { topic: 'agencies', parent_code: 'TOP' });
+    expect(envelope.isError).not.toBe(true);
+    const result = tool.output.parse(envelope.structuredContent);
+    expect(result.entries).toHaveLength(2);
+    expect(result.entries).toMatchObject([
+      { code: 'TOP-SUB', label: 'Sub á', total_count: 5 },
+      { code: 'TOP-SUB-LEAF', label: 'Leaf § <reference>', total_count: 2 },
+    ]);
+    const rendered = envelope.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(rendered).toContain('Leaf § &lt;reference&gt;');
+    const literal =
+      tool.format?.({
+        topic: 'agencies',
+        entries: [{ code: 'ID&42', label: 'Agency', parent_code: 'TOP&amp;' }],
+      }) ?? [];
+    expect(
+      literal
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n'),
+    ).toContain('| `ID&42` | Agency | `TOP&amp;` |');
+    const vocabulary = await runToolContract(tool, { topic: 'eligibilities', name_contains: 'é' });
+    expect(tool.output.parse(vocabulary.structuredContent).entries).toMatchObject([
+      { code: '99', label: 'All é' },
+    ]);
+  });
+});
 type Input = Parameters<typeof tool.input.parse>[0];
 
 let http: FetchMockHarness;

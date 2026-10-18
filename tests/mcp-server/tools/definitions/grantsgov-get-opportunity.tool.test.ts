@@ -20,11 +20,13 @@ import {
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { grantsgovGetOpportunity } from '@/mcp-server/tools/definitions/grantsgov-get-opportunity.tool.js';
+import { blockquote } from '@/mcp-server/tools/render.js';
 import {
   ALL_STATUSES,
   getGrantsGovService,
   initGrantsGovService,
 } from '@/services/grants-gov/grants-gov-service.js';
+import { htmlToText } from '@/services/grants-gov/html-to-text.js';
 import { daysBetween, todayET } from '@/services/grants-gov/normalize.js';
 import type { RawHit } from '@/services/grants-gov/types.js';
 import {
@@ -40,6 +42,7 @@ import {
   SEARCH2_URL,
   searchData,
 } from '../../../fixtures/grants-gov.js';
+import capturedDetails from '../../../fixtures/grants-gov-detail-pages.json' with { type: 'json' };
 import {
   DETAIL_DOD,
   DETAIL_DOS,
@@ -49,6 +52,174 @@ import {
 import { contractFailure, drained } from '../../../fixtures/harness.js';
 
 const tool = grantsgovGetOpportunity;
+
+describe('bounded text normalization contract', () => {
+  it.each([
+    [
+      'https://example.gov/?a=1&b=2',
+      '[https://example.gov/?a=1&amp;b=2](<https://example.gov/?a=1&amp;b=2>)',
+    ],
+    [
+      'https://example.gov/?a=1&amp;b=2',
+      '[https://example.gov/?a=1&amp;amp;b=2](<https://example.gov/?a=1&amp;amp;b=2>)',
+    ],
+    [
+      'https://example.gov/a\\b?a=1&b=2',
+      '[https://example.gov/a\\\\b?a=1&amp;b=2](<https://example.gov/a\\\\b?a=1&amp;b=2>)',
+    ],
+    [
+      'https://example.gov/a(b)[c]?a=1&b=2',
+      '[https://example.gov/a(b)\\[c\\]?a=1&amp;b=2](<https://example.gov/a(b)[c]?a=1&amp;b=2>)',
+    ],
+  ])('preserves additional-information destination %j', async (url, link) => {
+    serveDetails({
+      [DETAIL_NSF.id]: {
+        ...DETAIL_NSF,
+        synopsis: { ...DETAIL_NSF.synopsis, fundingDescLinkUrl: url },
+      },
+    });
+    const envelope = await runToolContract(tool, { opportunity_ids: [DETAIL_NSF.id] });
+    expect(envelope.isError).not.toBe(true);
+    const result = tool.output.parse(envelope.structuredContent);
+    expect(result.opportunities).toHaveLength(1);
+    expect(result.opportunities[0]?.additional_info_url).toBe(url);
+    const rendered = envelope.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(rendered).toContain(link);
+  });
+
+  it('decodes plain labels and narratives while keeping identifiers and URLs intact on both surfaces', async () => {
+    const raw = {
+      ...DETAIL_DOD,
+      opportunityNumber: 'ID&amp;42',
+      opportunityTitle: 'Health&reg; <reference>',
+      opportunityCategory: { category: 'D&amp;', description: 'Category &sect;' },
+      agencyDetails: { agencyCode: 'DOD&amp;', agencyName: 'Agency &Aacute;' },
+      topAgencyDetails: { agencyCode: 'TOP&amp;', agencyName: 'Top &aacute;' },
+      synopsis: {
+        ...DETAIL_DOD.synopsis,
+        synopsisDesc:
+          '<p>Eligible: states</p><!-- note --!><p>Also tribes</p><!-- end -->Deadline June 1 <span class="TextRun" d',
+        applicantEligibilityDesc:
+          '&amp;lt;ul&amp;gt;&lt;li&gt;States &amp;amp; tribes&lt;/li&gt;&lt;/ul&gt;',
+        fundingActivityCategoryDesc: '&sect; 1',
+        responseDateDesc: 'Use &sect; 2',
+        agencyContactName: 'Contact Avil&eacute;s-Santa',
+        agencyContactEmail: 'r&amp;d@agency.example',
+        agencyContactPhone: '555&#45;0100',
+        agencyContactDesc: 'Contact &reg;',
+        fundingDescLinkUrl: 'https://example.gov/?a=1&amp;b=2',
+        fundingDescLinkDesc: 'More &eacute;',
+        applicantTypes: [{ id: '99&amp;', description: 'Applicants &sect;' }],
+        fundingInstruments: [{ id: 'G', description: 'Grant &reg;' }],
+        fundingActivityCategories: [{ id: 'ST', description: 'Research &eacute;' }],
+      },
+      cfdas: [{ cfdaNumber: '12.351', programTitle: 'Program &reg;' }],
+      synopsisAttachmentFolders: [
+        {
+          folderType: 'Folder &eacute;',
+          synopsisAttachments: [
+            { id: 12, fileName: 'Contractor Q&amp;A.docx', fileDescription: 'File &sect;' },
+          ],
+        },
+      ],
+      opportunityPkgs: [
+        {
+          packageId: 'PKG&amp;',
+          competitionId: 'COMP&amp;',
+          competitionTitle: 'Competition &reg;',
+        },
+      ],
+      relatedOpps: [
+        {
+          opportunityId: 12,
+          opportunityNum: 'RELATED&amp;',
+          agencyCode: 'REL&amp;',
+          opportunityTitle: 'Related &reg;',
+          comments: '&lt;p&gt;Note &sect;&lt;/p&gt;',
+        },
+      ],
+    };
+    serveDetails({ [raw.id]: raw });
+    const envelope = await runToolContract(tool, { opportunity_ids: [raw.id] });
+    expect(envelope.isError).not.toBe(true);
+    const result = envelope.structuredContent as Output;
+    expect(result.opportunities).toHaveLength(1);
+    expect(result.opportunities[0]).toMatchObject({
+      opportunity_number: 'ID&amp;42',
+      title: 'Health® <reference>',
+      category_code: 'D&amp;',
+      category_label: 'Category §',
+      agency_code: 'DOD&amp;',
+      agency_name: 'Agency Á',
+      top_agency_name: 'Top á',
+      description: 'Eligible: states\n\nAlso tribes\n\nDeadline June 1',
+      eligibility_narrative: '- States & tribes',
+      funding_category_explanation: '§ 1',
+      close_date_explanation: 'Use § 2',
+      agency_contact: {
+        name: 'Contact Avilés-Santa',
+        email: 'r&d@agency.example',
+        phone: '555-0100',
+        details: 'Contact ®',
+      },
+      additional_info_url: raw.synopsis.fundingDescLinkUrl,
+      additional_info_label: 'More é',
+      applicant_types: [{ code: '99&amp;', label: 'Applicants §' }],
+      funding_instruments: [{ code: 'G', label: 'Grant ®' }],
+      funding_categories: [{ code: 'ST', label: 'Research é' }],
+      assistance_listings: [{ number: '12.351', program_title: 'Program ®' }],
+      attachments: [
+        {
+          attachment_id: 12,
+          folder_type: 'Folder é',
+          file_name: 'Contractor Q&A.docx',
+          description: 'File §',
+        },
+      ],
+      application_packages: [
+        { package_id: 'PKG&amp;', competition_id: 'COMP&amp;', competition_title: 'Competition ®' },
+      ],
+      related_opportunities: [
+        {
+          opportunity_number: 'RELATED&amp;',
+          agency_code: 'REL&amp;',
+          title: 'Related ®',
+          note: 'Note §',
+        },
+      ],
+    });
+    const rendered = envelope.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    for (const value of [
+      'Health® &lt;reference&gt;',
+      'Also tribes',
+      'States &amp; tribes',
+      'Contact Avilés-Santa',
+      'Contractor Q&amp;A.docx',
+      'Competition ®',
+      'Related ®',
+      'Applicants §',
+      'Grant ®',
+      'Research é',
+      'Program ®',
+      'Folder é',
+      'File §',
+      'More é',
+    ]) {
+      expect(rendered).toContain(value);
+    }
+    expect(rendered).toContain('**Opportunity number:** `ID&amp;42`');
+    expect(rendered).toContain('`PKG&amp;`');
+    expect(rendered).toContain('competition `COMP&amp;`');
+    expect(rendered).not.toContain('<span');
+    expect(rendered).not.toContain('<reference>');
+  });
+});
 type Input = Parameters<typeof tool.input.parse>[0];
 type Output = Parameters<NonNullable<typeof tool.format>>[0];
 type OpportunityRecord = Output['opportunities'][number];
@@ -136,6 +307,14 @@ describe('by id', () => {
     expect(result.opportunities).toEqual([
       {
         opportunity_id: 363423,
+        pages: {
+          attachment_offset: { offset: 0, total: 1 },
+          application_package_offset: { offset: 0, total: 1 },
+          description_offset: { offset: 0, total: 130 },
+          eligibility_offset: { offset: 0 },
+          funding_category_explanation_offset: { offset: 0 },
+          related_opportunity_offset: { offset: 0, total: 0 },
+        },
         opportunity_number: 'HRSA-27-005',
         title: 'Fiscal Year (FY) 2027 Service Area Competition (SAC)',
         status: 'posted',
@@ -605,6 +784,285 @@ describe('sparse and block-scoped records', () => {
 });
 
 describe('caps', () => {
+  const sections = [
+    ['attachment_offset', 'attachments', 30],
+    ['application_package_offset', 'application_packages', 10],
+    ['description_offset', 'description', 12_000],
+    ['eligibility_offset', 'eligibility_narrative', 6_000],
+    ['funding_category_explanation_offset', 'funding_category_explanation', 2_000],
+    ['related_opportunity_offset', 'related_opportunities', 10],
+  ] as const;
+
+  it('walks all six independent pages through second, last, and past-end without gaps', async () => {
+    const description = 'word '.repeat(7_000).trim();
+    const eligibility = 'eligible '.repeat(2_000).trim();
+    const category = 'category '.repeat(700).trim();
+    const raw = {
+      ...DETAIL_DOD,
+      synopsis: {
+        ...DETAIL_DOD.synopsis,
+        synopsisDesc: description,
+        applicantEligibilityDesc: eligibility,
+        fundingActivityCategoryDesc: category,
+      },
+      synopsisAttachmentFolders: [
+        {
+          synopsisAttachments: Array.from({ length: 79 }, (_, id) => ({ id, fileName: `f${id}` })),
+        },
+      ],
+      opportunityPkgs: Array.from({ length: 27 }, (_, id) => ({ packageId: `PKG${id}` })),
+      relatedOpps: Array.from({ length: 24 }, (_, id) => ({ opportunityId: id })),
+    };
+    serveDetails({ [raw.id]: raw });
+    const expected = {
+      attachments: Array.from({ length: 79 }, (_, attachment_id) => attachment_id),
+      application_packages: Array.from({ length: 27 }, (_, id) => `PKG${id}`),
+      description,
+      eligibility_narrative: eligibility,
+      funding_category_explanation: category,
+      related_opportunities: Array.from({ length: 24 }, (_, opportunity_id) => opportunity_id),
+    };
+    for (const [key, field, size] of sections) {
+      let args: Record<string, unknown> = { opportunity_ids: [raw.id] };
+      const collected: unknown[] = [];
+      let hops = 0;
+      while (true) {
+        const envelope = await runToolContract(tool, args);
+        expect(envelope.isError).not.toBe(true);
+        const record = (envelope.structuredContent as Output).opportunities[0];
+        expect(record).toBeDefined();
+        if (!record) throw new Error('Missing record');
+        const value = record[field];
+        if (value === undefined) throw new Error('Missing paged section');
+        if (typeof value === 'string') collected.push(value);
+        else
+          collected.push(
+            ...value.map((item) =>
+              'attachment_id' in item
+                ? item.attachment_id
+                : 'package_id' in item
+                  ? item.package_id
+                  : item.opportunity_id,
+            ),
+          );
+        const rendered = envelope.content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n');
+        if (typeof value === 'string') expect(rendered).toContain(blockquote(value));
+        const page = record.pages[key];
+        expect(page.offset).toBe(hops * size);
+        expect(rendered).toContain(`${key}: offset ${page.offset}; total ${page.total}`);
+        for (const [other] of sections)
+          if (other !== key) expect(record.pages[other].offset).toBe(0);
+        hops++;
+        if (!page.continuation) break;
+        expect(page.continuation.tool).toBe('grantsgov_get_opportunity');
+        expect(page.continuation.arguments).toEqual({
+          opportunity_ids: [raw.id],
+          [key]: page.next_offset,
+        });
+        expect(rendered).toContain(JSON.stringify(page.continuation));
+        args = page.continuation.arguments;
+      }
+      expect(hops).toBeGreaterThanOrEqual(3);
+      expect(typeof expected[field] === 'string' ? collected.join('') : collected).toEqual(
+        expected[field],
+      );
+      const envelope = await runToolContract(tool, {
+        opportunity_ids: [raw.id],
+        [key]: Number.MAX_SAFE_INTEGER,
+      });
+      expect(envelope.isError).not.toBe(true);
+      const record = (envelope.structuredContent as Output).opportunities[0];
+      expect(record?.[field]).toEqual(typeof expected[field] === 'string' ? '' : []);
+      expect(record?.pages[key]).not.toHaveProperty('next_offset');
+      expect(
+        envelope.content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n'),
+      ).toContain('empty page');
+    }
+    const combined = await run({
+      opportunity_ids: [raw.id],
+      attachment_offset: 30,
+      description_offset: 12_000,
+    });
+    expect(combined.result.opportunities[0]?.pages.attachment_offset.offset).toBe(30);
+    expect(combined.result.opportunities[0]?.pages.description_offset.offset).toBe(12_000);
+  });
+
+  it('preserves captured attachment, package and description tails, timestamps, and serialized surfaces', async () => {
+    serveDetails(capturedDetails);
+    for (const [id, key, field] of [
+      [347858, 'attachment_offset', 'attachments'],
+      [362681, 'application_package_offset', 'application_packages'],
+      [327185, 'description_offset', 'description'],
+    ] as const) {
+      let args: Record<string, unknown> = { opportunity_ids: [id] };
+      const collected: unknown[] = [];
+      let hops = 0;
+      while (true) {
+        const envelope = await runToolContract(tool, args);
+        expect(envelope.isError).not.toBe(true);
+        const record = (envelope.structuredContent as Output).opportunities[0];
+        if (!record) throw new Error('Missing captured record');
+        const value = record[field];
+        if (value === undefined) throw new Error('Missing captured section');
+        if (typeof value === 'string') collected.push(value);
+        else collected.push(...value);
+        const structuredBytes = Buffer.byteLength(JSON.stringify(envelope.structuredContent));
+        const contentBytes = Buffer.byteLength(JSON.stringify(envelope.content));
+        expect(structuredBytes).toBeGreaterThan(0);
+        expect(contentBytes).toBeGreaterThan(0);
+        expect(structuredBytes).toBeLessThan(50_000);
+        expect(contentBytes).toBeLessThan(50_000);
+        const rendered = envelope.content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n');
+        if (Array.isArray(value))
+          for (const item of value)
+            expect(rendered).toContain(
+              'attachment_id' in item ? String(item.attachment_id) : item.package_id,
+            );
+        hops++;
+        const next = record.pages[key].continuation;
+        if (!next) break;
+        expect(rendered).toContain(JSON.stringify(next));
+        args = next.arguments;
+      }
+      expect(hops).toBeGreaterThan(1);
+      if (id === 347858) {
+        const attachments = collected as OpportunityRecord['attachments'];
+        expect(attachments.map((item) => item.attachment_id)).toEqual(
+          capturedDetails['347858'].synopsisAttachmentFolders.flatMap((folder) =>
+            folder.synopsisAttachments.map((item) => item.id),
+          ),
+        );
+        expect(attachments.map((item) => item.attachment_id)).toEqual(
+          expect.arrayContaining([327893, 330959, 342125]),
+        );
+        expect(attachments[0]?.created_date).toBe(
+          capturedDetails['347858'].synopsisAttachmentFolders[0]?.synopsisAttachments[0]
+            ?.createdDate,
+        );
+      } else if (id === 362681)
+        expect(
+          (collected as OpportunityRecord['application_packages']).map((item) => item.package_id),
+        ).toEqual(capturedDetails['362681'].opportunityPkgs.map((item) => item.packageId));
+      else
+        expect(collected.join('')).toBe(
+          htmlToText(capturedDetails['327185'].forecast.forecastDesc).trim(),
+        );
+    }
+  });
+
+  it.each(sections)('rejects invalid %s offsets before fetching', async (key) => {
+    for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Infinity, '1']) {
+      const envelope = await runToolContract(tool, { opportunity_ids: [1], [key]: value });
+      expect(envelope.isError).toBe(true);
+      expect(envelope.content.some((block) => block.type === 'text' && block.text.length > 0)).toBe(
+        true,
+      );
+    }
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('reads captured latest revisions and preserves unknown, sparse, and active forecast metadata', async () => {
+    serveDetails(capturedDetails);
+    for (const [id, changed] of [
+      [364057, ['applicant_types']],
+      [334326, ['close_date', 'close_date_explanation']],
+      [328902, ['agency_contact.email']],
+    ] as const) {
+      const envelope = await runToolContract(tool, { opportunity_ids: [id] });
+      expect(envelope.isError).not.toBe(true);
+      const record = (envelope.structuredContent as Output).opportunities[0];
+      expect(record?.last_revision_note).toBeTruthy();
+      expect(record?.last_revision_changed).toEqual(changed);
+      const rendered = envelope.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      for (const field of changed) expect(rendered).toContain(field);
+    }
+    const active = {
+      ...DETAIL_FORECAST,
+      synopsis: { modComments: 'stale' },
+      synopsisModifiedFields: ['awardCeiling'],
+      forecast: { ...DETAIL_FORECAST.forecast, modComments: '<p>Forecast update</p>' },
+      forecastModifiedFields: [
+        'revision',
+        'version',
+        'createTimeStamp',
+        'estApplicationResponseDate',
+        'unknown',
+        'unknown',
+        'constructor',
+      ],
+    };
+    const record = await recordOf(active);
+    expect(record.last_revision_note).toBe('Forecast update');
+    expect(record.last_revision_changed).toEqual([
+      'close_date',
+      'upstream:unknown',
+      'upstream:constructor',
+    ]);
+    const technical = await recordOf({
+      ...DETAIL_DOD,
+      synopsis: { modComments: 'Meaningful note' },
+      synopsisModifiedFields: ['revision', 'version', 'createTimeStamp'],
+    });
+    expect(technical.last_revision_note).toBe('Meaningful note');
+    expect(technical).not.toHaveProperty('last_revision_changed');
+    const sparse = await recordOf({
+      id: 2,
+      ost: 'posted',
+      docType: 'synopsis',
+      synopsis: { modComments: '.' },
+    });
+    expect(sparse).not.toHaveProperty('last_revision_note');
+    expect(sparse).not.toHaveProperty('last_revision_changed');
+    expect(sparse).not.toHaveProperty('description');
+    expect(sparse.pages.description_offset).not.toHaveProperty('total');
+  });
+
+  it('retrieves a noninitial description slice and active revision metadata on both surfaces', async () => {
+    const raw = {
+      ...DETAIL_DOD,
+      synopsis: {
+        ...DETAIL_DOD.synopsis,
+        synopsisDesc: `${'A'.repeat(12_000)} tail`,
+        modComments: '<p>Deadline updated</p>',
+      },
+      synopsisModifiedFields: ['revision', 'responseDate', 'newAgencyField', 'responseDate'],
+    };
+    serveDetails({ [raw.id]: raw });
+    const envelope = await runToolContract(tool, {
+      opportunity_ids: [raw.id],
+      description_offset: 12_000,
+    });
+    expect(envelope.isError).not.toBe(true);
+    expect(envelope.structuredContent).toMatchObject({
+      opportunities: [
+        {
+          description: ' tail',
+          description_truncated: true,
+          last_revision_note: 'Deadline updated',
+          last_revision_changed: ['close_date', 'upstream:newAgencyField'],
+        },
+      ],
+    });
+    const rendered = envelope.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(rendered).toContain('Deadline updated');
+    expect(rendered).toContain('upstream:newAgencyField');
+  });
+
   const words = (count: number) => 'grant '.repeat(count).trim();
 
   /** DOD with every capped list and text field past its cap. */
@@ -667,13 +1125,114 @@ describe('caps', () => {
     expect(text).toContain('### Attachments (30 of 35)');
     expect(text).toContain('### Application packages (10 of 12 open; 25 closed)');
     expect(text).toContain('### Related opportunities (10 of 11)');
-    expect(text).toContain('### Description (truncated at 12,000 characters)');
-    expect(text).toContain('**Eligibility narrative (truncated at 6,000 characters):**');
-    expect(text).toContain('**Funding category explanation (truncated at 2,000 characters):**');
+    expect(text).toContain('### Description (partial page, up to 12,000 characters)');
+    expect(text).toContain('**Eligibility narrative (partial page, up to 6,000 characters):**');
+    expect(text).toContain(
+      '**Funding category explanation (partial page, up to 2,000 characters):**',
+    );
   });
 });
 
 describe('error contract', () => {
+  it('walks the executable queue first, second, and last batch without work on deferred numbers', async () => {
+    serveDetails({});
+    serveNumbers({});
+    let args: Record<string, unknown> = {
+      opportunity_ids: Array.from({ length: 11 }, (_, i) => i + 1),
+      opportunity_numbers: ['ABSENT', 'absent'],
+      attachment_offset: 30,
+      application_package_offset: 10,
+      description_offset: 12_000,
+      eligibility_offset: 6000,
+      funding_category_explanation_offset: 2000,
+      related_opportunity_offset: 10,
+    };
+    const batches: string[][] = [];
+    for (let step = 0; step < 3; step++) {
+      const envelope = await runToolContract(tool, args);
+      expect(envelope.isError).not.toBe(true);
+      const result = envelope.structuredContent as Output;
+      expect(result.opportunities).toHaveLength(0);
+      expect(result.unresolved.length).toBeGreaterThan(0);
+      batches.push(result.unresolved.map((entry) => entry.input));
+      if (step < 2) {
+        expect(callsTo(SEARCH2_URL)).toHaveLength(0);
+        expect(result.continuation?.arguments).toMatchObject({
+          attachment_offset: 30,
+          application_package_offset: 10,
+          description_offset: 12_000,
+          eligibility_offset: 6000,
+          funding_category_explanation_offset: 2000,
+          related_opportunity_offset: 10,
+        });
+        args = result.continuation?.arguments ?? {};
+      } else expect(result).not.toHaveProperty('continuation');
+    }
+    expect(batches).toEqual([
+      ['1', '2', '3', '4', '5'],
+      ['6', '7', '8', '9', '10'],
+      ['11', 'ABSENT'],
+    ]);
+    expect(await bodiesTo(FETCH_URL)).toHaveLength(11);
+    expect(await bodiesTo(SEARCH2_URL)).toHaveLength(1);
+  });
+
+  it('accepts duplicate-only excess and preserves blank-padded scalar production paths', async () => {
+    serveDetails({ 363423: DETAIL_HRSA });
+    serveNumbers({ '"HRSA-27-005"': [HRSA_HIT] });
+    for (const input of [
+      { opportunity_ids: '363423' },
+      { opportunity_numbers: '"HRSA-27-005"' },
+      { opportunity_ids: Array(50).fill('363423') },
+      { opportunity_ids: [363423, ...Array(60).fill(' ')] },
+    ]) {
+      const envelope = await runToolContract(tool, input);
+      expect(envelope.isError).not.toBe(true);
+      const result = envelope.structuredContent as Output;
+      expect(result.opportunities).toHaveLength(1);
+      expect(result).not.toHaveProperty('continuation');
+      expect(result.unresolved).toEqual([]);
+    }
+  });
+
+  it.each([
+    { opportunity_ids: 363423 },
+    { opportunity_numbers: 1 },
+    { opportunity_ids: [1, 2, 3, 4, 5, 'bad'] },
+    { opportunity_numbers: ['A', 'B', 'C', 'D', 'E', 'bad"quote'] },
+    { opportunity_ids: Array(51).fill(1) },
+  ])('rejects an invalid or oversized complete queue before any upstream work %j', async (args) => {
+    const envelope = await runToolContract(tool, args);
+    expect(envelope.isError).toBe(true);
+    expect(http.calls).toHaveLength(0);
+  });
+  it('bounded identifier queue defers numbers before resolving them and preserves offsets', async () => {
+    serveDetails({});
+    const envelope = await runToolContract(tool, {
+      opportunity_ids: [1, '2', 3, 4, 5, 6],
+      opportunity_numbers: ['"HRSA-27-005"', 'hrsa-27-005'],
+      description_offset: 12_000,
+    });
+    expect(envelope.isError).not.toBe(true);
+    expect(envelope.structuredContent).toMatchObject({
+      deferred_ids: [6],
+      deferred_numbers: ['HRSA-27-005'],
+      continuation: {
+        tool: 'grantsgov_get_opportunity',
+        arguments: {
+          opportunity_ids: [6],
+          opportunity_numbers: ['HRSA-27-005'],
+          description_offset: 12_000,
+        },
+      },
+    });
+    const requests = await bodiesTo(FETCH_URL);
+    expect(requests).toHaveLength(5);
+    expect(requests.map((body) => body.opportunityId)).toEqual([1, 2, 3, 4, 5]);
+    const blocks = envelope.content.filter((block) => block.type === 'text');
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks.map((block) => block.text).join('\n')).toContain('Deferred inputs');
+  });
   it.each([
     ['nothing', {}],
     ['blank form-client lists', { opportunity_ids: ['', ' '], opportunity_numbers: ['  '] }],
@@ -690,17 +1249,17 @@ describe('error contract', () => {
     expect(http.calls).toHaveLength(0);
   });
 
-  it('throws too_many_identifiers past 5 combined, before any upstream call', async () => {
+  it('throws too_many_identifiers past 50 combined, before any upstream call', async () => {
     const error = await failure({
-      opportunity_ids: [1, 2, 3],
-      opportunity_numbers: ['A-1', 'B-2', 'C-3'],
+      opportunity_ids: Array.from({ length: 26 }, (_, i) => i + 1),
+      opportunity_numbers: Array.from({ length: 25 }, (_, i) => `A-${i}`),
     });
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
-    expect(error.message).toBe('6 opportunities were requested; the limit is 5 per call.');
+    expect(error.message).toBe('51 unique identifiers were requested; the limit is 50 per call.');
     expect(error.data).toMatchObject({
       reason: 'too_many_identifiers',
       recovery: {
-        hint: 'Request at most 5 opportunities per call; split the list across several grantsgov_get_opportunity calls.',
+        hint: 'Pass at most 50 unique identifiers per call; split longer lists across several grantsgov_get_opportunity calls.',
       },
     });
     expect(http.calls).toHaveLength(0);
@@ -806,7 +1365,7 @@ describe('input schema', () => {
     ['a non-numeric id', { opportunity_ids: ['HRSA-27-005'] }],
     ['a negative id', { opportunity_ids: [-5] }],
     ['a number with a double quote', { opportunity_numbers: ['A"B'] }],
-    ['more than 5 ids in one list', { opportunity_ids: [1, 2, 3, 4, 5, 6] }],
+    ['more than 50 ids in one list', { opportunity_ids: Array(51).fill(1) }],
     ['a number over 100 characters', { opportunity_numbers: ['x'.repeat(101)] }],
   ])('rejects %s', (_label, input) => {
     expect(() => tool.input.parse(input)).toThrow();
@@ -928,7 +1487,7 @@ describe('format', () => {
     expect(text).toContain('**Archive date:** Not listed');
     expect(text).toContain('No additional eligibility text listed; see the attachments.');
     expect(text).toContain(
-      '**Additional information:** NSF Publication 26-523 <http://www.nsf.gov/publications/pub_summ.jsp?ods_key=nsf26523>',
+      '**Additional information:** NSF Publication 26-523 [http://www.nsf.gov/publications/pub\\_summ.jsp?ods\\_key=nsf26523](<http://www.nsf.gov/publications/pub_summ.jsp?ods_key=nsf26523>)',
     );
     expect(text).toContain('### Attachments (0 of 0)');
     expect(text).not.toContain('| ID | File |');
@@ -1020,7 +1579,7 @@ describe('format', () => {
     expect(text).toContain('- `1 ## Input` (opportunity_number): ambiguous. Pick one.');
     expect(text).toContain('  - id 169194: `1` Candidate ## Forged · agency not listed · archived');
     const ownHeading =
-      /^#{2,3} (Research|Deadline|Funding|Eligibility|Description|Agency contact|Attachments|Application packages|Related opportunities|Unresolved inputs)/;
+      /^#{2,3} (Research|Deadline|Funding|Eligibility|Description|Agency contact|Attachments|Application packages|Related opportunities|Retrieval pages|Unresolved inputs)/;
     const forged = text
       .split(/\r\n|[\n\v\f\r\u0085\u2028\u2029]/)
       .filter((line) => /^#{1,6} /.test(line) && !ownHeading.test(line));

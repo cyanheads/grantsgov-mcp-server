@@ -26,7 +26,11 @@ import {
   parseSlashDate,
   todayET,
 } from '@/services/grants-gov/normalize.js';
-import { encodeAgencyFilter, resolveAgencyScope } from '@/services/grants-gov/reference.js';
+import {
+  encodeAgencyFilter,
+  querySubAgencyFacets,
+  resolveAgencyScope,
+} from '@/services/grants-gov/reference.js';
 import type {
   ClosingWindowScan,
   RawFacetOption,
@@ -44,7 +48,7 @@ import {
   rawPattern,
   trimLower,
 } from '../input-schemas.js';
-import { inline, tableCell } from '../render.js';
+import { codeSpan, inline, tableCell, tableCodeSpan } from '../render.js';
 
 const DEFAULT_STATUSES: readonly Status[] = ['forecasted', 'posted'];
 
@@ -245,15 +249,15 @@ type Applied = z.infer<typeof AppliedFilters>;
 function renderAppliedFilters(applied: Applied): string {
   const parts = [
     `statuses ${applied.statuses.join(', ')}${applied.statuses_defaulted ? ' (default)' : ''}`,
-    applied.agencies_sent !== undefined && `agencies sent \`${applied.agencies_sent}\``,
+    applied.agencies_sent !== undefined && `agencies sent ${codeSpan(applied.agencies_sent)}`,
     applied.eligibilities_sent !== undefined &&
-      `eligibilities sent \`${applied.eligibilities_sent}\``,
+      `eligibilities sent ${codeSpan(applied.eligibilities_sent)}`,
     `include_unrestricted ${applied.include_unrestricted}`,
     applied.funding_categories && `funding categories ${applied.funding_categories.join(', ')}`,
     applied.funding_instruments && `funding instruments ${applied.funding_instruments.join(', ')}`,
     applied.assistance_listing !== undefined && `assistance listing ${applied.assistance_listing}`,
     applied.opportunity_number !== undefined &&
-      `opportunity number \`${inline(applied.opportunity_number)}\``,
+      `opportunity number ${codeSpan(applied.opportunity_number)}`,
     applied.posted_within_days !== undefined && `posted within ${applied.posted_within_days} days`,
     applied.closing_within_days !== undefined &&
       `closing within ${applied.closing_within_days} days (through ${applied.closing_cutoff_date})`,
@@ -276,7 +280,7 @@ function toRow(hit: RawHit, today: string): Row {
     status: hit.oppStatus?.toLowerCase() as Status,
     doc_type: hit.docType?.toLowerCase() as Row['doc_type'],
     ...(agencyCode && { agency_code: agencyCode }),
-    ...(agencyName && { agency_name: agencyName }),
+    ...(agencyName && { agency_name: decodeEntities(agencyName) }),
     ...(openDate && { open_date: openDate }),
     ...(closeDate && { close_date: closeDate }),
     close_date_kind: kind,
@@ -289,7 +293,9 @@ function toFacets(options: readonly RawFacetOption[] | null | undefined): Facet[
   return (options ?? []).flatMap((option) => {
     const code = option.value?.trim();
     if (!code) return [];
-    return [{ code, label: option.label?.trim() || code, count: option.count ?? 0 }];
+    return [
+      { code, label: decodeEntities(option.label?.trim() || code), count: option.count ?? 0 },
+    ];
   });
 }
 
@@ -348,13 +354,13 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       'Full-text search over title, description, opportunity number, and agency. Bare terms are all required (rural broadband = rural AND broadband); join alternatives with OR, quote phrases ("mental health"), exclude with NOT or -term, and use a trailing * for prefixes (broad*). OR mixed with AND or with bare terms must be grouped in parentheses, e.g. (rural OR tribal) broadband; an ungrouped mix is rejected. A word with an internal hyphen or period (COVID-19, K-12) is matched as a phrase. Field prefixes (agency:NSF, cfda:93.866) are rejected: use the agencies, assistance_listing, or other filter instead. See grantsgov_list_reference topic keyword_syntax.',
     ),
     statuses: optionalList(z.preprocess(trimLower, z.enum(STATUSES)), 4).describe(
-      'Lifecycle statuses to include: forecasted, posted, closed, archived. Default: forecasted and posted.',
+      'Lifecycle statuses to include: forecasted, posted, closed, archived. One whole string or an array, up to 4 nonblank entries. Default: forecasted and posted.',
     ),
     agencies: optionalList(AGENCY_CODE_INPUT, 10).describe(
-      'Agency codes from grantsgov_list_reference topic agencies (e.g. HHS, HHS-NIH11, NSF). A code includes its sub-agencies. Case-insensitive. Any listed agency matches.',
+      'Agency codes from grantsgov_list_reference topic agencies (e.g. HHS, HHS-NIH11, NSF). One whole string or an array, up to 10 nonblank entries. A code includes its sub-agencies. Case-insensitive. Any listed agency matches.',
     ),
     eligibilities: optionalList(ELIGIBILITY_INPUT, 17).describe(
-      'Two-digit applicant-type codes from grantsgov_list_reference topic eligibilities (e.g. 12 = nonprofits with 501(c)(3) status, 07 = federally recognized tribal governments), as strings or numbers. A single digit is zero-padded (7 = 07). Any listed type matches.',
+      'Two-digit applicant-type codes from grantsgov_list_reference topic eligibilities (e.g. 12 = nonprofits with 501(c)(3) status, 07 = federally recognized tribal governments). One whole string or an array of strings or numbers, up to 17 nonblank entries. A single digit is zero-padded (7 = 07). Any listed type matches.',
     ),
     include_unrestricted: z
       .boolean()
@@ -363,13 +369,13 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         'When eligibilities is set, also match opportunities open to any applicant type (code 99), which the specific codes do not cover. Set false to see only opportunities targeted at the listed types.',
       ),
     funding_categories: optionalList(FUNDING_CATEGORY_INPUT, 28).describe(
-      'Funding category codes from grantsgov_list_reference topic funding_categories (e.g. HL = Health, ED = Education). Case-insensitive. Any listed category matches.',
+      'Funding category codes from grantsgov_list_reference topic funding_categories (e.g. HL = Health, ED = Education). One whole string or an array, up to 28 nonblank entries. Case-insensitive. Any listed category matches.',
     ),
     funding_instruments: optionalList(
       z.preprocess(trimUpper, z.enum(FUNDING_INSTRUMENTS)),
       4,
     ).describe(
-      'Funding instruments: G (grant), CA (cooperative agreement), PC (procurement contract), O (other). Any listed instrument matches.',
+      'Funding instruments: G (grant), CA (cooperative agreement), PC (procurement contract), O (other). One whole string or an array, up to 4 nonblank entries. Any listed instrument matches.',
     ),
     assistance_listing: optionalText(ALN_INPUT).describe(
       'One assistance listing number (ALN, formerly CFDA), e.g. 93.866 or 93866, in any case. Only one value is supported.',
@@ -390,7 +396,15 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
     sort: optionalText(z.enum(SORTS)).describe(
       'Result order: relevance (best keyword match; needs keyword, otherwise the order is arbitrary), open_date_desc/open_date_asc (posting date), close_date_asc/close_date_desc (close date; no close date sorts last on asc), opportunity_number_asc/_desc, agency_asc/_desc. Default: relevance with a keyword, else open_date_desc.',
     ),
-    limit: z.number().int().min(1).max(100).default(25).describe('Rows per page (1-100).'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(1000)
+      .default(25)
+      .describe(
+        'Requested rows per page (1-1,000; default 25). Values above 100 return 100 rows with a notice.',
+      ),
     offset: z
       .number()
       .int()
@@ -416,7 +430,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         funding_instruments: facetList('Counts per funding instrument code.'),
         agencies: facetList('Counts per top-level agency code.'),
         sub_agencies: facetList(
-          'Counts per sub-agency code under the top-level agencies in the result. Present only when agencies is set.',
+          'Current-query subtree counts per sub-agency, including known intermediate parents. Present only when agencies is set. Number mode retains upstream facet scope; closing-window facets cover the wider posted set.',
         ).optional(),
       })
       .optional()
@@ -510,7 +524,8 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: input.limit });
+    const limit = Math.min(input.limit, 100);
+    ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: limit });
 
     const today = todayET();
     const closingDays = input.closing_within_days;
@@ -669,7 +684,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       }),
     };
     const sortBy = SORT_BY[sort];
-    const page = (hits: readonly RawHit[]) => hits.slice(input.offset, input.offset + input.limit);
+    const page = (hits: readonly RawHit[]) => hits.slice(input.offset, input.offset + limit);
 
     /**
      * One local page for an opportunity number, kept to exact matches. Sent quoted
@@ -741,20 +756,22 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
           ...filters,
           oppStatuses: statuses.join('|'),
           ...(sortBy !== undefined && { sortBy }),
-          rows: input.limit,
+          rows: limit,
           startRecordNum: input.offset,
         },
         ctx,
       );
       total = result.hitCount;
       /** `rows` asks for `limit` rows; the slice keeps a longer upstream page out of the response. */
-      hits = result.hits.slice(0, input.limit);
+      hits = result.hits.slice(0, limit);
       facets = result.facets;
     }
 
     const opportunities = hits.map((hit) => toRow(hit, today));
 
     const fragments: string[] = [];
+    if (input.limit > limit)
+      fragments.push(`Requested limit ${input.limit} was capped at ${limit} rows per page.`);
     if (primaryNotice !== undefined) {
       fragments.push(primaryNotice);
     } else if (total === 0) {
@@ -828,7 +845,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
     ctx.enrich({ totalCount: total, shown: opportunities.length });
     if (more) {
       ctx.enrich({ next_offset: nextOffset });
-      ctx.enrich.truncated({ shown: opportunities.length, cap: input.limit, guidance: notice });
+      ctx.enrich.truncated({ shown: opportunities.length, cap: limit, guidance: notice });
     } else if (notice) {
       ctx.enrich.notice(notice);
     }
@@ -849,11 +866,10 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         funding_categories: toFacets(facets.fundingCategories),
         funding_instruments: toFacets(facets.fundingInstruments),
         agencies: toFacets(facets.agencies),
-        ...(input.agencies !== undefined && {
-          sub_agencies: (facets.agencies ?? []).flatMap((top) =>
-            toFacets(top.subAgencyOptions).filter((sub) => sub.code !== top.value?.trim()),
-          ),
-        }),
+        ...(input.agencies !== undefined &&
+          snapshot && {
+            sub_agencies: querySubAgencyFacets(facets, snapshot),
+          }),
       },
     };
   },
@@ -877,12 +893,12 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         const agency =
           [
             row.agency_name !== undefined && tableCell(row.agency_name),
-            row.agency_code !== undefined && `\`${tableCell(row.agency_code)}\``,
+            row.agency_code !== undefined && tableCodeSpan(row.agency_code),
           ]
             .filter(Boolean)
             .join(' ') || 'Not listed';
         lines.push(
-          `| ${closes} | ${row.days_until_close ?? '—'} | ${tableCell(row.title)} | \`${tableCell(row.opportunity_number)}\` | ${tableCell(row.opportunity_id)} | ${agency} | ${row.status} (${row.doc_type}) | ${row.open_date ?? 'not listed'} | ${row.assistance_listings.map(tableCell).join(', ') || 'none'} |`,
+          `| ${closes} | ${row.days_until_close ?? '—'} | ${tableCell(row.title)} | ${tableCodeSpan(row.opportunity_number)} | ${tableCell(row.opportunity_id)} | ${agency} | ${row.status} (${row.doc_type}) | ${row.open_date ?? 'not listed'} | ${row.assistance_listings.map(tableCell).join(', ') || 'none'} |`,
         );
       }
     }
@@ -901,7 +917,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       for (const [heading, list] of groups) {
         if (!list) continue;
         const values = list.map(
-          (facet) => `\`${inline(facet.code)}\` ${inline(facet.label)} (${facet.count})`,
+          (facet) => `${codeSpan(facet.code)} ${inline(facet.label)} (${facet.count})`,
         );
         lines.push(`- **${heading}:** ${values.length > 0 ? values.join('; ') : 'none'}`);
       }

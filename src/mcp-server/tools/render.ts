@@ -13,8 +13,36 @@
  */
 const LINE_BREAK = /\r\n|[\n\v\f\r\u0085\u2028\u2029]/g;
 
+/** Escapes agency text before insertion into rendered markdown. */
+const escapeHtml = (text: string): string =>
+  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 /** An upstream string placed inside a line: every line break flattened to one space. */
-export const inline = (text: string): string => text.replace(LINE_BREAK, ' ');
+export const inline = (text: string): string => escapeHtml(text).replace(LINE_BREAK, ' ');
+
+/** Renders an agency URL with a literal label and a portable Markdown destination. */
+export const urlLink = (url: string): string => {
+  const label = inline(url).replace(/[\\[\]`*_~]/g, '\\$&');
+  const destination = escapeHtml(url.replaceAll('\\', '\\\\'));
+  return `[${label}](<${destination}>)`;
+};
+
+/** Renders a literal identifier as Markdown code, retaining its characters. */
+export const codeSpan = (text: string): string => {
+  const value = text.replace(LINE_BREAK, ' ');
+  if (value === '') return '';
+  let longest = 0;
+  for (const run of value.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
+  const fence = '`'.repeat(longest + 1);
+  const pad =
+    value.startsWith('`') ||
+    value.endsWith('`') ||
+    (value.startsWith(' ') && value.endsWith(' ') && /[^ ]/.test(value));
+  return `${fence}${pad ? ` ${value} ` : value}${fence}`;
+};
+
+/** GFM tables consume one backslash before each pipe, including inside code. */
+export const tableCodeSpan = (text: string): string => codeSpan(text).replaceAll('|', '\\|');
 
 /**
  * An upstream string placed in a markdown table cell: flattened, with `|`
@@ -22,11 +50,15 @@ export const inline = (text: string): string => text.replace(LINE_BREAK, ' ');
  * cannot turn the added escape into an escaped backslash and split the row.
  */
 export const tableCell = (text: string): string =>
-  inline(text).replace(/(\\*)\|/g, (_pipe, backslashes: string) => `${backslashes.repeat(2)}\\|`);
+  inline(text).replaceAll('|', (_pipe, offset: number, source: string) => {
+    let start = offset;
+    while (start > 0 && source[start - 1] === '\\') start--;
+    return `${'\\'.repeat(offset - start + 1)}|`;
+  });
 
 /** A multi-line upstream field: every line prefixed with `> ` (blank lines as `>`). */
 export const blockquote = (text: string): string =>
   text
     .split(LINE_BREAK)
-    .map((line) => (line.trim() === '' ? '>' : `> ${line}`))
+    .map((line) => (line.trim() === '' ? '>' : `> ${escapeHtml(line)}`))
     .join('\n');

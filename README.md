@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/grantsgov-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/grantsgov-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/grantsgov-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/grantsgov-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/grantsgov-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/grantsgov-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-US federal funding opportunities from Grants.gov, covering every agency's forecasted, posted, closed, and archived notices. Search by keyword, agency, applicant type, funding category, assistance listing, or deadline window, then read a full record: award range, eligibility, key dates, agency contact, and NOFO attachments. The Grants.gov API is keyless, so there is nothing to configure; the server runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+US federal funding opportunities from Grants.gov, covering every agency's forecasted, posted, closed, and archived notices. Search by keyword, agency, applicant type, funding category, assistance listing, or deadline window, then read a full record: award range, eligibility, key dates, agency contact, and NOFO attachments. No API key required.
 
 ### Tools
 
@@ -47,18 +47,19 @@ US federal funding opportunities from Grants.gov, covering every agency's foreca
 - `eligibilities` also matches opportunities open to any applicant type (code `99`) unless `include_unrestricted` is `false`
 - Keyword terms are all required; join alternatives with `OR`, quote phrases, exclude with `NOT` or `-term`, and use a trailing `*` for prefixes. An ungrouped AND/OR mix or a field prefix (`agency:NSF`) fails as `invalid_keyword`
 - `closing_within_days` (0–365) scans posted opportunities by close date; it allows only the `posted` status and the `close_date_asc` sort, and `posted_within_days` rejects `closed` and `archived` (`filter_conflict`)
-- Up to 100 rows per page (default 25) with offset paging via `next_offset`; `effective_keyword` and `applied_filters` echo what was sent, and `include_facets: false` drops the facet counts
+- Up to 100 rows per page (default 25); `limit` accepts 1–1,000 and values above 100 are capped with a notice. Offset paging uses `next_offset`; `effective_keyword` and `applied_filters` echo what was sent. Sub-agency facets count each subtree under the current upstream query; `include_facets: false` drops the facet counts
 - Rows carry `close_date_kind` (`fixed`, `none_listed`, `placeholder`) and `days_until_close`, but no award amounts. Unknown codes fail as `unknown_agency`, `unknown_eligibility`, or `unknown_funding_category`
 
 ---
 
 ### `grantsgov_get_opportunity` <sub>tool</sub>
 
-- Up to 5 opportunities per call across `opportunity_ids` and `opportunity_numbers`; numbers resolve across all four statuses
+- Accept up to 50 nonblank entries per identifier list and 50 normalized unique identifiers combined. Read the first 5 identifiers, ids before numbers; `deferred_ids`, `deferred_numbers`, and an executable `continuation` carry the remaining queue with the original section offsets. Numbers resolve across all four statuses; selected aliases fetch a record once per call
 - A miss or a number shared by several opportunities comes back in `unresolved[]` as `not_found` or `ambiguous` (with `candidates`), not as an error
 - Records carry the close date (an estimate on forecasts, flagged by `close_date_is_estimate`), award ceiling and floor, total funding, expected awards, cost sharing, applicant types with the eligibility narrative, assistance listings, and the agency contact
 - Funding and eligibility fields come from the synopsis or forecast block matching `doc_type`, named in `money_source`; forecasts add `forecast_estimates`
-- Caps: description 12,000 characters and eligibility narrative 6,000 (cut text is flagged `*_truncated`); attachments 30 (each with a `download_url`), application packages 10, and related opportunities 10, each list with its total count
+- Independent pages: description 12,000 characters, eligibility narrative 6,000, funding-category explanation 2,000, attachments 30, application packages 10, and related opportunities 10. The six zero-based inputs are `description_offset`, `eligibility_offset`, `funding_category_explanation_offset`, `attachment_offset`, `application_package_offset`, and `related_opportunity_offset` (default 0). Each record's `pages` supplies full totals and executable single-opportunity continuations; partial narratives retain `*_truncated`, and past-end pages are empty. Attachments include `download_url` and the unchanged upstream `created_date` when listed
+- `last_revision_note` and `last_revision_changed` summarize the active synopsis or forecast's latest revision when listed. Changed names map to public fields; unknown names keep an `upstream:` prefix. Missing metadata does not mean nothing changed
 
 ---
 
@@ -75,10 +76,11 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 Grants.gov-specific:
 
+- List inputs accept one whole string or an array; blank values and members read as unset. Strings are never split on commas, spaces, or line breaks
 - Keyless client for the Grants.gov REST API (`search2`, `fetchOpportunity`), with retries and at most 4 concurrent upstream requests per process
 - Inputs mapped to the form Grants.gov reads as intended: bare keyword terms joined with `AND`, hyphenated tokens (`COVID-19`, `K-12`) matched as phrases, agency codes expanded to their sub-agency subtree, opportunity numbers matched literally, and filter codes checked against the live vocabulary
 - Deadlines counted from today in US Eastern Time, the zone Grants.gov publishes in; far-future stand-in close dates are flagged `placeholder` rather than reported as deadlines
-- Agency HTML converted to plain text; in `content[]`, multi-line agency text renders as blockquotes and inline text is flattened to one line
+- HTML5 entities decoded in human-readable fields; narrative HTML converted to plain text. In `content[]`, agency prose is HTML-escaped, identifiers retain literal code styling, multi-line fields render as blockquotes, and inline text is flattened to one line
 
 Agent-friendly output:
 

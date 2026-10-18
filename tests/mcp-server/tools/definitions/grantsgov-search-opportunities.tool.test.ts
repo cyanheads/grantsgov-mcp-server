@@ -48,8 +48,58 @@ import {
 import { contractFailure, drained } from '../../../fixtures/harness.js';
 
 const tool = grantsgovSearchOpportunities;
+
+describe('entity text contract', () => {
+  it('decodes row and nested facet labels across both response surfaces', async () => {
+    page(
+      [
+        {
+          ...HRSA_HIT,
+          number: 'ID&42',
+          title: 'Health&reg; <reference>',
+          agency: 'Agency &Aacute;',
+        },
+      ],
+      1,
+      {
+        agencies: [
+          {
+            value: 'TOP&amp;',
+            label: 'Top &eacute;',
+            count: 1,
+            subAgencyOptions: [{ value: 'SUB&amp;', label: 'Sub &sect;', count: 1 }],
+          },
+        ],
+        fundingCategories: [{ value: 'ST', label: 'Category &reg;', count: 1 }],
+      },
+    );
+    const envelope = await runToolContract(tool, { agencies: ['HHS'], include_facets: true });
+    expect(envelope.isError).not.toBe(true);
+    const result = envelope.structuredContent as Output;
+    expect(result.opportunities).toHaveLength(1);
+    expect(result.opportunities[0]).toMatchObject({
+      title: 'Health® <reference>',
+      agency_name: 'Agency Á',
+    });
+    expect(result.facets).toMatchObject({
+      agencies: [{ code: 'TOP&amp;', label: 'Top é' }],
+      sub_agencies: [{ code: 'SUB&amp;', label: 'Sub §' }],
+      funding_categories: [{ code: 'ST', label: 'Category ®' }],
+    });
+    const rendered = envelope.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    for (const value of ['Health® &lt;reference&gt;', 'Agency Á', 'Top é', 'Sub §', 'Category ®'])
+      expect(rendered).toContain(value);
+    expect(result.opportunities[0]?.opportunity_number).toBe('ID&42');
+    expect(rendered).toContain('`ID&42`');
+    expect(rendered).toContain('`TOP&amp;`');
+  });
+});
 type Input = Parameters<typeof tool.input.parse>[0];
 type Output = Parameters<NonNullable<typeof tool.format>>[0];
+type EnvelopeOutput = Output & { next_offset?: number; notice?: string };
 
 if (!tool.enrichment)
   throw new Error('grantsgov_search_opportunities declares no enrichment block');
@@ -443,6 +493,151 @@ describe('paging', () => {
 });
 
 describe('facets', () => {
+  it.each([
+    ['statuses', 'posted'],
+    ['agencies', 'hhs'],
+    ['eligibilities', '7'],
+    ['funding_categories', 'hl'],
+    ['funding_instruments', 'g'],
+  ])('production singleton %s matches its array input', async (field, value) => {
+    page([HRSA_HIT], 1);
+    const singleton = await runToolContract(tool, { [field]: value });
+    const array = await runToolContract(tool, { [field]: [value] });
+    expect(singleton.isError).not.toBe(true);
+    expect(singleton.structuredContent).toEqual(array.structuredContent);
+    expect(singleton.content).toEqual(array.content);
+  });
+
+  it('keeps filtered facet counts independent of priming and status scope', async () => {
+    const capturedCdc = [
+      ['HHS-CDC-CSTLTS', 1],
+      ['HHS-CDC-NCBDDD', 3],
+      ['HHS-CDC-NCCDPHP', 6],
+      ['HHS-CDC-NCEH', 1],
+      ['HHS-CDC-NCEZID', 3],
+      ['HHS-CDC-NCHHSTP', 9],
+      ['HHS-CDC-NCIPC', 7],
+      ['HHS-CDC-OD', 1],
+      ['HHS-CDC-OPHPR', 1],
+      ['HHS-CDC-HHSCDCERA', 52],
+      ['HHS-CDC-GHC', 3],
+    ] as const;
+    serve((body) =>
+      ok(
+        searchData([], 0, {
+          agencies: [
+            {
+              value: 'HHS',
+              count: body.keyword ? 3 : 87,
+              subAgencyOptions: body.keyword
+                ? [{ value: 'HHS-CDC-HHSCDCERA', count: 3 }]
+                : capturedCdc.map(([value, count]) => ({ value, count })),
+            },
+          ],
+        }),
+      ),
+    );
+    for (const statuses of [['posted'], ['forecasted']]) {
+      const unfiltered = await runToolContract(tool, { agencies: ['HHS'], statuses });
+      const filtered = await runToolContract(tool, {
+        agencies: ['HHS'],
+        statuses,
+        keyword: 'opioid',
+      });
+      const parentCount = (envelope: typeof filtered) =>
+        (envelope.structuredContent as Output).facets?.sub_agencies?.find(
+          (row) => row.code === 'HHS-CDC',
+        )?.count;
+      expect(parentCount(unfiltered)).toBe(87);
+      expect(parentCount(filtered)).toBe(3);
+    }
+  });
+
+  it.each([{ opportunity_number: 'EXACT' }, { closing_within_days: 30 }, {}])(
+    'bounded search limit preserves first/second/last/past-end pages %j',
+    async (mode) => {
+      const rows = Array.from({ length: 231 }, (_, i) => ({
+        ...HRSA_HIT,
+        id: String(i + 1),
+        number: 'EXACT',
+        closeDate: closingIn(1),
+      }));
+      serve((body) =>
+        ok(
+          searchData(
+            body.oppNum
+              ? rows
+              : rows.slice(body.startRecordNum ?? 0, (body.startRecordNum ?? 0) + (body.rows ?? 0)),
+            rows.length,
+          ),
+        ),
+      );
+      for (const [offset, shown, next] of [
+        [0, 100, 100],
+        [100, 100, 200],
+        [200, 31, undefined],
+        [300, 0, undefined],
+      ] as const) {
+        const envelope = await runToolContract(tool, {
+          ...mode,
+          limit: 1000,
+          offset,
+          include_facets: false,
+        });
+        expect(envelope.isError).not.toBe(true);
+        expect(envelope.structuredContent).toMatchObject({ cap: 100, shown });
+        const result = envelope.structuredContent as EnvelopeOutput;
+        expect(ids(result)).toEqual(rows.slice(offset, offset + 100).map((row) => row.id));
+        expect(result.next_offset).toBe(next);
+        expect(result.notice).toContain('capped at 100');
+        if (offset === 300) expect(result.notice).toContain('past the end');
+      }
+    },
+  );
+  it('query-scoped subtree counts include known missing parents without global counts', async () => {
+    page([], 3, {
+      agencies: [
+        {
+          value: 'HHS',
+          count: 3,
+          subAgencyOptions: [{ value: 'HHS-CDC-NCCDPHP', label: 'Child', count: 3 }],
+        },
+      ],
+    });
+    const envelope = await runToolContract(tool, { agencies: ['HHS'], keyword: 'opioid' });
+    expect(envelope.isError).not.toBe(true);
+    expect(envelope.structuredContent).toMatchObject({
+      facets: {
+        agencies: [{ code: 'HHS', count: 3 }],
+        sub_agencies: [
+          { code: 'HHS-CDC', count: 3 },
+          { code: 'HHS-CDC-NCCDPHP', count: 3 },
+        ],
+      },
+    });
+    const text = envelope.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toMatch(/`HHS-CDC` [^;\n]* \(3\)(?:;|$)/m);
+  });
+  it('bounded search limit clamps the real page and composes pagination notice', async () => {
+    page(
+      Array.from({ length: 130 }, (_, i) => ({ ...HRSA_HIT, id: String(i + 1) })),
+      201,
+    );
+    const envelope = await runToolContract(tool, { limit: 101, include_facets: false });
+    expect(envelope.isError).not.toBe(true);
+    expect(envelope.structuredContent).toMatchObject({
+      cap: 100,
+      shown: 100,
+      next_offset: 100,
+      truncated: true,
+    });
+    expect((envelope.structuredContent as Output).opportunities).toHaveLength(100);
+    expect((envelope.structuredContent as EnvelopeOutput).notice).toContain('100');
+    expect((envelope.structuredContent as EnvelopeOutput).notice).toContain('offset 100');
+  });
   it('maps every facet group, trimming labels, with no sub_agencies unless agencies is set', async () => {
     page(CDC_FORECAST_HITS, 58, CDC_FACETS);
     const { result } = await run({});
@@ -470,6 +665,7 @@ describe('facets', () => {
     page(CDC_FORECAST_HITS, 58, CDC_FACETS);
     const { result } = await run({ agencies: ['HHS-CDC'] });
     expect(result.facets?.sub_agencies?.map((facet) => facet.code)).toEqual([
+      'HHS-CDC',
       'HHS-CDC-CSTLTS',
       'HHS-CDC-NCBDDD',
       'HHS-CDC-NCCDPHP',
@@ -1063,7 +1259,7 @@ describe('input schema', () => {
     ['posted_within_days 0', { posted_within_days: 0 }],
     ['closing_within_days over 365', { closing_within_days: 366 }],
     ['a non-digit day string', { closing_within_days: 'soon' }],
-    ['limit over 100', { limit: 101 }],
+    ['limit over 1000', { limit: 1001 }],
     ['a keyword over 500 characters', { keyword: 'x'.repeat(501) }],
     ['more than 10 agencies', { agencies: Array.from({ length: 11 }, () => 'NSF') }],
   ])('rejects %s', (_label, input) => {

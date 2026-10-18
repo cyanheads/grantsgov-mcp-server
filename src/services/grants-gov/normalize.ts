@@ -5,6 +5,8 @@
  * @module services/grants-gov/normalize
  */
 
+import { decodeHTMLStrict } from 'entities/decode';
+
 /** How a listed close date should be read. */
 export type CloseDateKind = 'fixed' | 'none_listed' | 'placeholder';
 
@@ -132,21 +134,23 @@ export function closeDateKind(closeIso: string | undefined, today: string): Clos
     : 'fixed';
 }
 
-const NAMED_ENTITIES: Readonly<Record<string, string>> = {
-  nbsp: '\xa0',
-  amp: '&',
-  quot: '"',
-  apos: "'",
-  lt: '<',
-  gt: '>',
-  ldquo: '“',
-  rdquo: '”',
-  lsquo: '‘',
-  rsquo: '’',
-  ndash: '–',
-  mdash: '—',
-  hellip: '…',
-};
+const LEGACY_ALIASES = new Map(
+  Object.entries({
+    nbsp: '\xa0',
+    amp: '&',
+    quot: '"',
+    apos: "'",
+    lt: '<',
+    gt: '>',
+    ldquo: '“',
+    rdquo: '”',
+    lsquo: '‘',
+    rsquo: '’',
+    ndash: '–',
+    mdash: '—',
+    hellip: '…',
+  }),
+);
 
 /** A numeric reference to a valid, non-surrogate code point; `undefined` otherwise. */
 function fromCodePoint(codePoint: number): string | undefined {
@@ -156,16 +160,23 @@ function fromCodePoint(codePoint: number): string | undefined {
 }
 
 /**
- * Decodes HTML entities in one pass: the named set Grants.gov emits plus numeric
- * `&#…;` / `&#x…;` references. Unknown named entities are left as written, and a
- * double-encoded `&amp;rsquo;` decodes once, to `&rsquo;`.
+ * Decodes at most two layers of semicolon-terminated HTML5 references. Exact
+ * names win over the historical mixed-case aliases. Invalid numeric references
+ * and unknown names stay literal.
  */
 export function decodeEntities(text: string): string {
-  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, body: string) => {
-    if (body[0] === '#') {
-      const isHex = body[1] === 'x' || body[1] === 'X';
-      return fromCodePoint(Number.parseInt(body.slice(isHex ? 2 : 1), isHex ? 16 : 10)) ?? entity;
-    }
-    return NAMED_ENTITIES[body.toLowerCase()] ?? entity;
-  });
+  let decoded = text;
+  for (let pass = 0; pass < 2; pass++) {
+    decoded = decoded.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (entity, body: string) => {
+      if (body[0] === '#') {
+        const isHex = body[1] === 'x' || body[1] === 'X';
+        return fromCodePoint(Number.parseInt(body.slice(isHex ? 2 : 1), isHex ? 16 : 10)) ?? entity;
+      }
+      const exact = decodeHTMLStrict(entity);
+      if (exact !== entity) return exact;
+      const alias = body.toLowerCase();
+      return LEGACY_ALIASES.get(alias) ?? entity;
+    });
+  }
+  return decoded;
 }

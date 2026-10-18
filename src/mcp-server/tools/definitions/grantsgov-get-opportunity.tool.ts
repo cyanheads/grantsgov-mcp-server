@@ -33,15 +33,96 @@ import type {
   RawHit,
 } from '@/services/grants-gov/types.js';
 import { OPPORTUNITY_NUMBER_INPUT, optionalList } from '../input-schemas.js';
-import { blockquote, inline, tableCell } from '../render.js';
+import { blockquote, codeSpan, inline, tableCell, urlLink } from '../render.js';
 
 const MAX_IDENTIFIERS = 5;
+const MAX_QUEUED_IDENTIFIERS = 50;
 const DESCRIPTION_CAP = 12_000;
 const ELIGIBILITY_CAP = 6_000;
 const CATEGORY_EXPLANATION_CAP = 2_000;
 const ATTACHMENT_CAP = 30;
 const PACKAGE_CAP = 10;
 const RELATED_CAP = 10;
+
+const PAGE_SIZES = {
+  attachment_offset: ATTACHMENT_CAP,
+  application_package_offset: PACKAGE_CAP,
+  description_offset: DESCRIPTION_CAP,
+  eligibility_offset: ELIGIBILITY_CAP,
+  funding_category_explanation_offset: CATEGORY_EXPLANATION_CAP,
+  related_opportunity_offset: RELATED_CAP,
+} as const;
+const PageOffsets = z.object({
+  attachment_offset: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe('Zero-based attachment offset; defaults to 0. Page size 30.'),
+  application_package_offset: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe('Zero-based open package offset; defaults to 0. Page size 10.'),
+  description_offset: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe(
+      'Zero-based normalized description character offset; defaults to 0. Page size 12,000.',
+    ),
+  eligibility_offset: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe(
+      'Zero-based normalized eligibility character offset; defaults to 0. Page size 6,000.',
+    ),
+  funding_category_explanation_offset: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe(
+      'Zero-based normalized category explanation character offset; defaults to 0. Page size 2,000.',
+    ),
+  related_opportunity_offset: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe('Zero-based related opportunity offset; defaults to 0. Page size 10.'),
+});
+type PageOffset = keyof typeof PAGE_SIZES;
+type Offsets = z.infer<typeof PageOffsets>;
+const Page = z.object({
+  offset: z.number().int().describe('Requested zero-based offset.'),
+  total: z
+    .number()
+    .int()
+    .optional()
+    .describe('Full normalized character or item count. Omitted for an absent narrative.'),
+  next_offset: z
+    .number()
+    .int()
+    .optional()
+    .describe('Next offset; absent on the final or past-end page.'),
+  continuation: z
+    .object({
+      tool: z.literal('grantsgov_get_opportunity').describe('Tool to call.'),
+      arguments: PageOffsets.extend({
+        opportunity_ids: z
+          .array(z.number().int())
+          .length(1)
+          .describe('The single opportunity to continue.'),
+      }).describe('Executable arguments advancing only this section.'),
+    })
+    .optional()
+    .describe('Next call for this section; other offsets default to zero.'),
+});
 
 /** A numeric id, as a number or a digit string (search rows emit `"363423"`). */
 const OPPORTUNITY_ID_INPUT = z
@@ -51,6 +132,11 @@ const OPPORTUNITY_ID_INPUT = z
   ])
   .transform(Number)
   .pipe(z.number().int().min(1, 'An opportunity id is a positive whole number, e.g. 363423.'));
+
+const DeferredArguments = PageOffsets.extend({
+  opportunity_ids: z.array(z.number().int()).describe('Unprocessed numeric ids, in order.'),
+  opportunity_numbers: z.array(z.string()).describe('Unprocessed opportunity numbers, in order.'),
+});
 
 const DETAIL_URL = 'https://www.grants.gov/search-results-detail/';
 const ATTACHMENT_URL = 'https://apply07.grants.gov/grantsws/rest/opportunity/att/download/';
@@ -156,6 +242,30 @@ const OpportunityRecord = z
       .describe(
         'Earlier revisions of the synopsis and forecast (the history itself is not returned).',
       ),
+    last_revision_note: z
+      .string()
+      .optional()
+      .describe(
+        'Agency note on the latest active synopsis or forecast revision; omitted when unavailable.',
+      ),
+    last_revision_changed: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Changed public field names; unknown names retain the upstream: prefix. Not a computed historical diff.',
+      ),
+    pages: z
+      .object({
+        attachment_offset: Page.describe('Attachment page.'),
+        application_package_offset: Page.describe('Open application package page.'),
+        description_offset: Page.describe('Description character page.'),
+        eligibility_offset: Page.describe('Eligibility character page.'),
+        funding_category_explanation_offset: Page.describe('Category explanation character page.'),
+        related_opportunity_offset: Page.describe('Related opportunity page.'),
+      })
+      .describe(
+        'Independent bounded pages; execute each continuation literally to retrieve its remaining section.',
+      ),
     money_source: z
       .enum(['synopsis', 'forecast'])
       .describe(
@@ -211,7 +321,7 @@ const OpportunityRecord = z
     eligibility_narrative_truncated: z
       .boolean()
       .optional()
-      .describe('True when eligibility_narrative was cut at 6,000 characters.'),
+      .describe('True when the eligibility page omits a prefix or suffix of the full narrative.'),
     funding_instruments: codeLabelList('Funding instruments (grant, cooperative agreement, ...).'),
     funding_categories: codeLabelList('Funding activity categories.'),
     funding_category_explanation: z
@@ -223,7 +333,7 @@ const OpportunityRecord = z
     funding_category_explanation_truncated: z
       .boolean()
       .optional()
-      .describe('True when funding_category_explanation was cut at 2,000 characters.'),
+      .describe('True when the category explanation page omits a prefix or suffix.'),
     assistance_listings: z
       .array(
         z
@@ -243,7 +353,7 @@ const OpportunityRecord = z
     description_truncated: z
       .boolean()
       .optional()
-      .describe('True when description was cut at 12,000 characters.'),
+      .describe('True when the description page omits a prefix or suffix of the full description.'),
     agency_contact: z
       .object({
         name: z.string().optional().describe('Contact name or office.'),
@@ -274,6 +384,10 @@ const OpportunityRecord = z
             description: z.string().optional().describe('File description.'),
             mime_type: z.string().optional().describe('File MIME type.'),
             size_in_bytes: z.number().optional().describe('File size in bytes.'),
+            created_date: z
+              .string()
+              .optional()
+              .describe('Upstream attachment timestamp unchanged, including its stated timezone.'),
             download_url: z.string().describe('Direct download link (no login needed).'),
           })
           .describe('One NOFO or supporting attachment.'),
@@ -373,24 +487,73 @@ function plain(raw: string | null | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-/** Caps text at `max` characters, reporting whether it was cut. */
-function cap(value: string | undefined, max: number): { text?: string; truncated: boolean } {
-  if (value === undefined) return { truncated: false };
-  if (value.length <= max) return { text: value, truncated: false };
-  return { text: value.slice(0, max).trimEnd(), truncated: true };
+/** Human-readable plain text receives entity decoding without markup conversion. */
+function label(raw: string | null | undefined): string | undefined {
+  const value = plain(raw);
+  return value === undefined ? undefined : decodeEntities(value);
 }
+
+/** Caps text at `max` characters, reporting whether it was cut. */
+function cap(
+  value: string | undefined,
+  max: number,
+  offset: number,
+): { text?: string; truncated: boolean } {
+  if (value === undefined) return { truncated: false };
+  return { text: value.slice(offset, offset + max), truncated: offset > 0 || value.length > max };
+}
+
+/** Explicit source-to-output names for latest-revision metadata. */
+const REVISION_FIELDS: Readonly<Record<string, string>> = {
+  responseDate: 'close_date',
+  responseDateStr: 'close_date',
+  responseDateDesc: 'close_date_explanation',
+  applicantTypes: 'applicant_types',
+  applicantEligibilityDesc: 'eligibility_narrative',
+  agencyContactEmail: 'agency_contact.email',
+  agencyContactName: 'agency_contact.name',
+  agencyContactPhone: 'agency_contact.phone',
+  agencyContactDesc: 'agency_contact.details',
+  agencyContactEmailDesc: 'agency_contact.details',
+  synopsisDesc: 'description',
+  forecastDesc: 'description',
+  awardCeiling: 'award_ceiling_usd',
+  awardFloor: 'award_floor_usd',
+  estimatedFunding: 'estimated_total_funding_usd',
+  numberOfAwards: 'expected_awards',
+  costSharing: 'cost_sharing_required',
+  fundingActivityCategories: 'funding_categories',
+  fundingActivityCategoryDesc: 'funding_category_explanation',
+  fundingInstruments: 'funding_instruments',
+  fundingDescLinkUrl: 'additional_info_url',
+  fundingDescLinkDesc: 'additional_info_label',
+  postingDateStr: 'posted_date',
+  archiveDateStr: 'archive_date',
+  lastUpdatedDate: 'last_updated',
+  estApplicationResponseDate: 'close_date',
+  estApplicationResponseDateStr: 'close_date',
+  estApplicationResponseDateDesc: 'close_date_explanation',
+  estSynopsisPostingDateStr: 'forecast_estimates.est_post_date',
+  estAwardDateStr: 'forecast_estimates.est_award_date',
+  estProjectStartDateStr: 'forecast_estimates.est_project_start_date',
+  fiscalYear: 'forecast_estimates.fiscal_year',
+};
 
 function codeLabels(entries: readonly RawCodeDescription[] | null | undefined) {
   return (entries ?? []).flatMap((entry) => {
     const code = plain(entry.id);
     if (!code) return [];
-    const label = plain(entry.description);
-    return [{ code, ...(label && { label }) }];
+    const description = label(entry.description);
+    return [{ code, ...(description && { label: description }) }];
   });
 }
 
 /** Maps a raw detail record, reading block-scoped fields from the block named by `docType`. */
-function toRecord(raw: RawDetail & { id: number }, today: string): OpportunityRecordValue {
+function toRecord(
+  raw: RawDetail & { id: number },
+  today: string,
+  offsets: Offsets,
+): OpportunityRecordValue {
   const isForecast = raw.docType?.toLowerCase() === 'forecast';
   const block = (isForecast ? raw.forecast : raw.synopsis) ?? {};
   const { id } = raw;
@@ -403,15 +566,28 @@ function toRecord(raw: RawDetail & { id: number }, today: string): OpportunityRe
   const explanation = text(
     isForecast ? block.estApplicationResponseDateDesc : block.responseDateDesc,
   );
-  const description = cap(
-    text(isForecast ? block.forecastDesc : block.synopsisDesc),
-    DESCRIPTION_CAP,
-  );
-  const eligibility = cap(text(block.applicantEligibilityDesc), ELIGIBILITY_CAP);
+  const fullDescription = text(isForecast ? block.forecastDesc : block.synopsisDesc);
+  const fullEligibility = text(block.applicantEligibilityDesc);
+  const fullCategoryExplanation = text(block.fundingActivityCategoryDesc);
+  const description = cap(fullDescription, DESCRIPTION_CAP, offsets.description_offset ?? 0);
+  const eligibility = cap(fullEligibility, ELIGIBILITY_CAP, offsets.eligibility_offset ?? 0);
   const categoryExplanation = cap(
-    text(block.fundingActivityCategoryDesc),
+    fullCategoryExplanation,
     CATEGORY_EXPLANATION_CAP,
+    offsets.funding_category_explanation_offset ?? 0,
   );
+  const revisionNote = text(block.modComments);
+  const changedFields = [
+    ...new Set(
+      (isForecast ? raw.forecastModifiedFields : raw.synopsisModifiedFields)
+        ?.filter((field) => !['revision', 'version', 'createTimeStamp'].includes(field))
+        .map(
+          (field) =>
+            (Object.hasOwn(REVISION_FIELDS, field) ? REVISION_FIELDS[field] : undefined) ??
+            `upstream:${field}`,
+        ),
+    ),
+  ];
 
   const ceiling = parseMoney(block.awardCeiling);
   const floor = parseMoney(block.awardFloor);
@@ -430,9 +606,9 @@ function toRecord(raw: RawDetail & { id: number }, today: string): OpportunityRe
       )
     : {};
 
-  const contactName = plain(block.agencyContactName);
-  const contactEmail = plain(block.agencyContactEmail);
-  const contactPhone = plain(block.agencyContactPhone);
+  const contactName = label(block.agencyContactName);
+  const contactEmail = label(block.agencyContactEmail);
+  const contactPhone = label(block.agencyContactPhone);
   const emailLabel = text(block.agencyContactEmailDesc);
   const contactDetails =
     text(block.agencyContactDesc) ?? (emailLabel !== contactEmail ? emailLabel : undefined);
@@ -446,13 +622,16 @@ function toRecord(raw: RawDetail & { id: number }, today: string): OpportunityRe
   const allAttachments = (raw.synopsisAttachmentFolders ?? []).flatMap((folder) =>
     (folder.synopsisAttachments ?? []).flatMap((attachment) => {
       if (typeof attachment.id !== 'number') return [];
-      const folderType = plain(folder.folderType);
-      const fileName = plain(attachment.fileName);
-      const fileDescription = plain(attachment.fileDescription);
+      const folderType = label(folder.folderType);
+      const fileName = label(attachment.fileName);
+      const fileDescription = label(attachment.fileDescription);
       const mimeType = plain(attachment.mimeType);
       return [
         {
           attachment_id: attachment.id,
+          ...(typeof attachment.createdDate === 'string' && {
+            created_date: attachment.createdDate,
+          }),
           ...(folderType && { folder_type: folderType }),
           ...(fileName && { file_name: fileName }),
           ...(fileDescription && { description: fileDescription }),
@@ -510,16 +689,32 @@ function toRecord(raw: RawDetail & { id: number }, today: string): OpportunityRe
   });
 
   const categoryCode = plain(raw.opportunityCategory?.category);
-  const categoryLabel = plain(raw.opportunityCategory?.description);
+  const categoryLabel = label(raw.opportunityCategory?.description);
   const agencyCode = plain(raw.agencyDetails?.agencyCode) ?? plain(raw.owningAgencyCode);
-  const agencyName = plain(raw.agencyDetails?.agencyName);
+  const agencyName = label(raw.agencyDetails?.agencyName);
   const topCode = plain(raw.topAgencyDetails?.agencyCode);
-  const topName = plain(raw.topAgencyDetails?.agencyName);
+  const topName = label(raw.topAgencyDetails?.agencyName);
   const postedDate = parseStrDate(block.postingDateStr);
   const archiveDate = parseStrDate(block.archiveDateStr);
   const lastUpdated = parseLongDate(block.lastUpdatedDate);
   const infoUrl = plain(block.fundingDescLinkUrl);
-  const infoLabel = plain(block.fundingDescLinkDesc);
+  const infoLabel = label(block.fundingDescLinkDesc);
+  const page = (key: PageOffset, total: number | undefined): z.infer<typeof Page> => {
+    const offset = offsets[key] ?? 0;
+    const next = offset + PAGE_SIZES[key];
+    return {
+      offset,
+      ...(total !== undefined && { total }),
+      ...(total !== undefined &&
+        next < total && {
+          next_offset: next,
+          continuation: {
+            tool: 'grantsgov_get_opportunity' as const,
+            arguments: { opportunity_ids: [id], [key]: next },
+          },
+        }),
+    };
+  };
 
   return {
     opportunity_id: id,
@@ -544,6 +739,19 @@ function toRecord(raw: RawDetail & { id: number }, today: string): OpportunityRe
     ...(archiveDate && { archive_date: archiveDate }),
     ...(lastUpdated && { last_updated: lastUpdated }),
     past_revision_count: (raw.synopsisHistCount ?? 0) + (raw.forecastHistCount ?? 0),
+    ...(revisionNote !== undefined && revisionNote !== '.' && { last_revision_note: revisionNote }),
+    ...(changedFields.length > 0 && { last_revision_changed: changedFields }),
+    pages: {
+      attachment_offset: page('attachment_offset', allAttachments.length),
+      application_package_offset: page('application_package_offset', allPackages.length),
+      description_offset: page('description_offset', fullDescription?.length),
+      eligibility_offset: page('eligibility_offset', fullEligibility?.length),
+      funding_category_explanation_offset: page(
+        'funding_category_explanation_offset',
+        fullCategoryExplanation?.length,
+      ),
+      related_opportunity_offset: page('related_opportunity_offset', allRelated.length),
+    },
     money_source: isForecast ? 'forecast' : 'synopsis',
     ...(ceiling !== undefined && { award_ceiling_usd: ceiling }),
     ...(floor !== undefined && { award_floor_usd: floor }),
@@ -571,19 +779,28 @@ function toRecord(raw: RawDetail & { id: number }, today: string): OpportunityRe
     ...(Object.keys(contact).length > 0 && { agency_contact: contact }),
     ...(infoUrl && { additional_info_url: infoUrl }),
     ...(infoLabel && { additional_info_label: infoLabel }),
-    attachments: allAttachments.slice(0, ATTACHMENT_CAP),
+    attachments: allAttachments.slice(
+      offsets.attachment_offset ?? 0,
+      (offsets.attachment_offset ?? 0) + ATTACHMENT_CAP,
+    ),
     attachment_count: allAttachments.length,
-    application_packages: allPackages.slice(0, PACKAGE_CAP),
+    application_packages: allPackages.slice(
+      offsets.application_package_offset ?? 0,
+      (offsets.application_package_offset ?? 0) + PACKAGE_CAP,
+    ),
     application_package_count: allPackages.length,
     closed_package_count: raw.closedOpportunityPkgs?.length ?? 0,
-    related_opportunities: allRelated.slice(0, RELATED_CAP),
+    related_opportunities: allRelated.slice(
+      offsets.related_opportunity_offset ?? 0,
+      (offsets.related_opportunity_offset ?? 0) + RELATED_CAP,
+    ),
     related_opportunity_count: allRelated.length,
   };
 }
 
 function toCandidate(hit: RawHit): z.infer<typeof Candidate> {
   const agencyCode = plain(hit.agencyCode);
-  const agencyName = plain(hit.agency);
+  const agencyName = label(hit.agency);
   const openDate = parseSlashDate(hit.openDate);
   const closeDate = parseSlashDate(hit.closeDate);
   return {
@@ -609,9 +826,9 @@ const usd = (value: number | undefined) =>
 function renderRecord(record: OpportunityRecordValue): string[] {
   const lines: string[] = [`## ${inline(record.title)}`, ''];
   const agency = (name: string | undefined, code: string | undefined) =>
-    [name && inline(name), code && `\`${inline(code)}\``].filter(Boolean).join(' ') || 'Not listed';
+    [name && inline(name), code && codeSpan(code)].filter(Boolean).join(' ') || 'Not listed';
   lines.push(
-    `**Opportunity number:** \`${inline(record.opportunity_number)}\` · **ID:** ${record.opportunity_id} · **Status:** ${record.status} (${record.doc_type})`,
+    `**Opportunity number:** ${codeSpan(record.opportunity_number)} · **ID:** ${record.opportunity_id} · **Status:** ${record.status} (${record.doc_type})`,
     `**Category:** ${[record.category_code && inline(record.category_code), record.category_label && inline(record.category_label)].filter(Boolean).join(' ') || 'Not listed'}`,
     `**Agency:** ${agency(record.agency_name, record.agency_code)}${record.top_agency_code !== undefined || record.top_agency_name !== undefined ? ` · **Top-level agency:** ${agency(record.top_agency_name, record.top_agency_code)}` : ''}`,
     `**Grants.gov page:** ${record.grants_gov_url}`,
@@ -653,6 +870,12 @@ function renderRecord(record: OpportunityRecordValue): string[] {
     `- **Expected awards:** ${record.expected_awards ?? 'Not available'}`,
     `- **Cost sharing required:** ${record.cost_sharing_required === undefined ? 'Not available' : record.cost_sharing_required ? 'Yes' : 'No'}`,
   );
+  if (record.last_revision_note !== undefined)
+    lines.push('**Latest revision note:**', blockquote(record.last_revision_note));
+  if (record.last_revision_changed)
+    lines.push(
+      `**Latest revision changed:** ${record.last_revision_changed.map(inline).join(', ')}`,
+    );
 
   const estimates = record.forecast_estimates;
   if (estimates) {
@@ -671,14 +894,12 @@ function renderRecord(record: OpportunityRecordValue): string[] {
     entries.length === 0
       ? 'None listed'
       : entries
-          .map(
-            (entry) => `\`${inline(entry.code)}\`${entry.label ? ` ${inline(entry.label)}` : ''}`,
-          )
+          .map((entry) => `${codeSpan(entry.code)}${entry.label ? ` ${inline(entry.label)}` : ''}`)
           .join('; ');
   lines.push('', '### Eligibility', `**Applicant types:** ${codes(record.applicant_types)}`);
-  if (record.eligibility_narrative) {
+  if (record.eligibility_narrative !== undefined) {
     lines.push(
-      `**Eligibility narrative${record.eligibility_narrative_truncated ? ' (truncated at 6,000 characters)' : ''}:**`,
+      `**Eligibility narrative${record.eligibility_narrative_truncated ? ' (partial page, up to 6,000 characters)' : ''}:**`,
       blockquote(record.eligibility_narrative),
     );
   } else {
@@ -691,9 +912,9 @@ function renderRecord(record: OpportunityRecordValue): string[] {
     `**Funding instruments:** ${codes(record.funding_instruments)}`,
     `**Funding categories:** ${codes(record.funding_categories)}`,
   );
-  if (record.funding_category_explanation) {
+  if (record.funding_category_explanation !== undefined) {
     lines.push(
-      `**Funding category explanation${record.funding_category_explanation_truncated ? ' (truncated at 2,000 characters)' : ''}:**`,
+      `**Funding category explanation${record.funding_category_explanation_truncated ? ' (partial page, up to 2,000 characters)' : ''}:**`,
       blockquote(record.funding_category_explanation),
     );
   }
@@ -710,10 +931,10 @@ function renderRecord(record: OpportunityRecordValue): string[] {
     }`,
   );
 
-  if (record.description) {
+  if (record.description !== undefined) {
     lines.push(
       '',
-      `### Description${record.description_truncated ? ' (truncated at 12,000 characters)' : ''}`,
+      `### Description${record.description_truncated ? ' (partial page, up to 12,000 characters)' : ''}`,
       blockquote(record.description),
     );
   }
@@ -730,7 +951,7 @@ function renderRecord(record: OpportunityRecordValue): string[] {
   }
   if (record.additional_info_url || record.additional_info_label) {
     lines.push(
-      `**Additional information:** ${[record.additional_info_label && inline(record.additional_info_label), record.additional_info_url && `<${inline(record.additional_info_url)}>`].filter(Boolean).join(' ')}`,
+      `**Additional information:** ${[record.additional_info_label && inline(record.additional_info_label), record.additional_info_url && urlLink(record.additional_info_url)].filter(Boolean).join(' ')}`,
     );
   }
 
@@ -742,7 +963,7 @@ function renderRecord(record: OpportunityRecordValue): string[] {
     );
     for (const file of record.attachments) {
       lines.push(
-        `| ${file.attachment_id} | ${file.file_name ? tableCell(file.file_name) : 'Not listed'} | ${file.folder_type ? tableCell(file.folder_type) : ''} | ${file.mime_type ? tableCell(file.mime_type) : ''} | ${file.size_in_bytes ?? ''} | ${file.description ? tableCell(file.description) : ''} | ${file.download_url} |`,
+        `| ${file.attachment_id} | ${file.file_name ? tableCell(file.file_name) : 'Not listed'} | ${file.folder_type ? tableCell(file.folder_type) : ''} | ${file.mime_type ? tableCell(file.mime_type) : ''} | ${file.size_in_bytes ?? ''} | ${file.description ? tableCell(file.description) : ''}${file.created_date !== undefined ? ` (created ${tableCell(file.created_date)})` : ''} | ${file.download_url} |`,
       );
     }
   }
@@ -753,7 +974,7 @@ function renderRecord(record: OpportunityRecordValue): string[] {
   );
   for (const pkg of record.application_packages) {
     const details = [
-      pkg.competition_id && `competition \`${inline(pkg.competition_id)}\``,
+      pkg.competition_id && `competition ${codeSpan(pkg.competition_id)}`,
       pkg.competition_title && inline(pkg.competition_title),
       pkg.opening_date && `opens ${pkg.opening_date}`,
       pkg.closing_date && `closes ${pkg.closing_date}`,
@@ -761,7 +982,7 @@ function renderRecord(record: OpportunityRecordValue): string[] {
         `electronic submission ${pkg.electronic_required ? 'required' : 'not required'}`,
     ].filter(Boolean);
     lines.push(
-      `- \`${inline(pkg.package_id)}\`${details.length > 0 ? `: ${details.join(', ')}` : ''}`,
+      `- ${codeSpan(pkg.package_id)}${details.length > 0 ? `: ${details.join(', ')}` : ''}`,
     );
   }
 
@@ -772,9 +993,9 @@ function renderRecord(record: OpportunityRecordValue): string[] {
     );
     for (const related of record.related_opportunities) {
       const details = [
-        related.opportunity_number && `\`${inline(related.opportunity_number)}\``,
+        related.opportunity_number && codeSpan(related.opportunity_number),
         related.title && inline(related.title),
-        related.agency_code && `\`${inline(related.agency_code)}\``,
+        related.agency_code && codeSpan(related.agency_code),
         related.posted_date && `posted ${related.posted_date}`,
         related.close_date && `closes ${related.close_date}`,
         related.note && `note: ${inline(related.note)}`,
@@ -784,21 +1005,31 @@ function renderRecord(record: OpportunityRecordValue): string[] {
       );
     }
   }
+  lines.push('', '### Retrieval pages');
+  for (const [name, page] of Object.entries(record.pages)) {
+    lines.push(
+      `- ${name}: offset ${page.offset}; total ${page.total ?? 'not listed'}${page.total !== undefined && page.offset >= page.total ? '; empty page' : ''}.`,
+    );
+    if (page.next_offset !== undefined) lines.push(`Next offset: ${page.next_offset}`);
+    if (page.continuation)
+      lines.push('Next call:', '```json', JSON.stringify(page.continuation), '```');
+  }
   return lines;
 }
 
 export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
   title: 'Get Grants.gov Opportunity',
   description:
-    'Read the full Grants.gov record for up to 5 opportunities, given numeric opportunity ids or opportunity numbers: deadline and its explanation, award ceiling and floor, total funding, expected awards, cost sharing, eligible applicant types with the eligibility narrative, description, assistance listings, agency contact, NOFO attachments with download links, and application packages. An opportunity number is resolved across all statuses. A miss or an ambiguous number comes back as an unresolved entry with guidance, not an error.',
+    'Read the Grants.gov record for up to 5 opportunities, given numeric opportunity ids or opportunity numbers: deadline, funding, eligibility, description, assistance listings, contact, attachments, packages, and latest revision metadata. Lists and narratives are bounded independent pages; follow each record pages continuation to retrieve the remaining section. An opportunity number is resolved across all statuses. A miss or an ambiguous number comes back as an unresolved entry with guidance, not an error.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
-    opportunity_ids: optionalList(OPPORTUNITY_ID_INPUT, MAX_IDENTIFIERS).describe(
-      'Numeric Grants.gov ids (e.g. 363423, or "363423" as search rows emit them), from grantsgov_search_opportunities opportunity_id. Up to 5 combined with opportunity_numbers.',
+    ...PageOffsets.shape,
+    opportunity_ids: optionalList(OPPORTUNITY_ID_INPUT, MAX_QUEUED_IDENTIFIERS).describe(
+      'Numeric Grants.gov ids (e.g. 363423, or "363423" as search rows emit them), from grantsgov_search_opportunities opportunity_id. Accepts one whole string or an array, with at most 50 nonblank entries per list and 50 unique ids and numbers combined. Reads the first 5 identifiers, ids before numbers; remaining inputs have an executable continuation.',
     ),
-    opportunity_numbers: optionalList(OPPORTUNITY_NUMBER_INPUT, MAX_IDENTIFIERS).describe(
-      'Agency-assigned opportunity numbers (e.g. HRSA-27-005), matched exactly and case-insensitively across all statuses; one pair of surrounding double quotes is removed. A number shared by several opportunities comes back as ambiguous with candidates. Up to 5 combined with opportunity_ids.',
+    opportunity_numbers: optionalList(OPPORTUNITY_NUMBER_INPUT, MAX_QUEUED_IDENTIFIERS).describe(
+      'Agency-assigned opportunity numbers (e.g. HRSA-27-005), matched exactly and case-insensitively across all statuses; one pair of surrounding double quotes is removed. Accepts one whole string or an array, with at most 50 nonblank entries per list and 50 unique ids and numbers combined. Reads the first 5 identifiers, ids before numbers; remaining inputs have an executable continuation. A number shared by several opportunities comes back as ambiguous with candidates.',
     ),
   }),
 
@@ -807,6 +1038,23 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
     unresolved: z
       .array(UnresolvedEntry)
       .describe('Inputs that did not resolve to exactly one record. Empty when all resolved.'),
+    deferred_ids: z
+      .array(z.number().int())
+      .optional()
+      .describe('Unprocessed ids, omitted when none remain.'),
+    deferred_numbers: z
+      .array(z.string())
+      .optional()
+      .describe('Unprocessed numbers, omitted when none remain.'),
+    continuation: z
+      .object({
+        tool: z.literal('grantsgov_get_opportunity').describe('Tool to call.'),
+        arguments: DeferredArguments.describe(
+          'Executable remaining queue with the original section offsets.',
+        ),
+      })
+      .optional()
+      .describe('Next identifier batch, omitted when the queue is exhausted.'),
   }),
 
   enrichment: {
@@ -824,9 +1072,9 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
     {
       reason: 'too_many_identifiers',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'More than 5 ids and numbers combined after de-duplication.',
+      when: 'More than 50 ids and numbers combined after de-duplication.',
       recovery:
-        'Request at most 5 opportunities per call; split the list across several grantsgov_get_opportunity calls.',
+        'Pass at most 50 unique identifiers per call; split longer lists across several grantsgov_get_opportunity calls.',
     },
     {
       reason: 'upstream_unavailable',
@@ -858,21 +1106,38 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
   ],
 
   async handler(input, ctx) {
-    const ids = [...new Set(input.opportunity_ids ?? [])];
-    const numbers: string[] = [];
+    const allIds = [...new Set(input.opportunity_ids ?? [])];
+    const allNumbers: string[] = [];
     for (const number of input.opportunity_numbers ?? []) {
-      if (!numbers.some((kept) => kept.toLowerCase() === number.toLowerCase()))
-        numbers.push(number);
+      if (!allNumbers.some((kept) => kept.toLowerCase() === number.toLowerCase()))
+        allNumbers.push(number);
     }
-    if (ids.length === 0 && numbers.length === 0) {
+    if (allIds.length === 0 && allNumbers.length === 0) {
       throw ctx.fail('no_identifiers', 'Pass at least one opportunity id or opportunity number.');
     }
-    if (ids.length + numbers.length > MAX_IDENTIFIERS) {
+    if (allIds.length + allNumbers.length > MAX_QUEUED_IDENTIFIERS) {
       throw ctx.fail(
         'too_many_identifiers',
-        `${ids.length + numbers.length} opportunities were requested; the limit is ${MAX_IDENTIFIERS} per call.`,
+        `${allIds.length + allNumbers.length} unique identifiers were requested; the limit is ${MAX_QUEUED_IDENTIFIERS} per call.`,
       );
     }
+
+    const ids = allIds.slice(0, MAX_IDENTIFIERS);
+    const numbers = allNumbers.slice(0, MAX_IDENTIFIERS - ids.length);
+    const deferredIds = allIds.slice(ids.length);
+    const deferredNumbers = allNumbers.slice(numbers.length);
+    const deferred = deferredIds.length + deferredNumbers.length > 0;
+    const offsets = PageOffsets.parse(input);
+    const continuation = deferred
+      ? {
+          tool: 'grantsgov_get_opportunity' as const,
+          arguments: {
+            ...offsets,
+            opportunity_ids: deferredIds,
+            opportunity_numbers: deferredNumbers,
+          },
+        }
+      : undefined;
 
     const service = getGrantsGovService();
     const resolutions: NumberResolution[] = await Promise.all(
@@ -901,7 +1166,7 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
       if (result?.kind !== 'found') return false;
       if (!included.has(id)) {
         included.add(id);
-        opportunities.push(toRecord(result.record, today));
+        opportunities.push(toRecord(result.record, today, input));
       }
       return true;
     };
@@ -939,6 +1204,7 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
       }
     }
 
+    const notices: string[] = [];
     if (unresolved.length > 0) {
       const summary = unresolved
         .map((entry) =>
@@ -947,17 +1213,30 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
             : `${entry.input_kind === 'opportunity_id' ? 'id ' : ''}"${entry.input}" was not found`,
         )
         .join('; ');
-      ctx.enrich.notice(
+      notices.push(
         `${unresolved.length} of ${ids.length + numbers.length} inputs did not resolve to one record: ${summary}. Each unresolved entry carries the next call to make.`,
       );
     }
+    if (deferred)
+      notices.push(
+        `${deferredIds.length + deferredNumbers.length} identifiers deferred after the first ${MAX_IDENTIFIERS}; call the executable continuation to read the remaining inputs.`,
+      );
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('Fetched Grants.gov opportunities', {
       requested: ids.length + numbers.length,
       found: opportunities.length,
       unresolved: unresolved.length,
     });
-    return { opportunities, unresolved };
+    return {
+      opportunities,
+      unresolved,
+      ...(continuation && {
+        deferred_ids: deferredIds,
+        deferred_numbers: deferredNumbers,
+        continuation,
+      }),
+    };
   },
 
   format: (result) => {
@@ -968,15 +1247,26 @@ export const grantsgovGetOpportunity = tool('grantsgov_get_opportunity', {
       lines.push('## Unresolved inputs');
       for (const entry of result.unresolved) {
         lines.push(
-          `- \`${inline(entry.input)}\` (${entry.input_kind}): ${entry.outcome}. ${inline(entry.guidance)}`,
+          `- ${codeSpan(entry.input)} (${entry.input_kind}): ${entry.outcome}. ${inline(entry.guidance)}`,
         );
         for (const candidate of entry.candidates ?? []) {
           lines.push(
-            `  - id ${candidate.opportunity_id}: \`${inline(candidate.opportunity_number)}\` ${inline(candidate.title)} · ${[candidate.agency_name && inline(candidate.agency_name), candidate.agency_code && `\`${inline(candidate.agency_code)}\``].filter(Boolean).join(' ') || 'agency not listed'} · ${candidate.status}${candidate.open_date ? ` · posted ${candidate.open_date}` : ''}${candidate.close_date ? ` · closes ${candidate.close_date}` : ''}`,
+            `  - id ${candidate.opportunity_id}: ${codeSpan(candidate.opportunity_number)} ${inline(candidate.title)} · ${[candidate.agency_name && inline(candidate.agency_name), candidate.agency_code && codeSpan(candidate.agency_code)].filter(Boolean).join(' ') || 'agency not listed'} · ${candidate.status}${candidate.open_date ? ` · posted ${candidate.open_date}` : ''}${candidate.close_date ? ` · closes ${candidate.close_date}` : ''}`,
           );
         }
       }
     }
+    if (result.continuation)
+      lines.push(
+        '',
+        '## Deferred inputs',
+        `IDs: ${(result.deferred_ids ?? []).map(String).join(', ') || 'none'}`,
+        `Numbers: ${(result.deferred_numbers ?? []).map(codeSpan).join(', ') || 'none'}`,
+        'Next call:',
+        '```json',
+        JSON.stringify(result.continuation),
+        '```',
+      );
     return [{ type: 'text', text: lines.join('\n').trimEnd() }];
   },
 });

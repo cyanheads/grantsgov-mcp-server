@@ -6,9 +6,119 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { blockquote, inline, tableCell } from '@/mcp-server/tools/render.js';
+import {
+  blockquote,
+  codeSpan,
+  inline,
+  tableCell,
+  tableCodeSpan,
+  urlLink,
+} from '@/mcp-server/tools/render.js';
+
+describe('agency URL links', () => {
+  it('preserves source entity spellings and escapes link-label punctuation', () => {
+    expect(urlLink('https://example.gov/a(b)[c]\\d?x=1&amp;y=2')).toBe(
+      '[https://example.gov/a(b)\\[c\\]\\\\d?x=1&amp;amp;y=2](<https://example.gov/a(b)[c]\\\\d?x=1&amp;amp;y=2>)',
+    );
+    expect(urlLink('https://example.gov/a*b_c~d`e`')).toBe(
+      '[https://example.gov/a\\*b\\_c\\~d\\`e\\`](<https://example.gov/a*b_c~d`e`>)',
+    );
+  });
+
+  it.each(['\\', '[', ']', '&', '`*_', 'a'])('URL CPU scaling %j', { timeout: 30_000 }, (token) => {
+    for (const breaks of [false, true]) {
+      const make = (size: number) => {
+        const value = token.repeat(Math.ceil(size / token.length)).slice(0, size);
+        return `https://example.gov/${breaks ? value.replace(/.{64}/g, '$&\n') : value}\n`;
+      };
+      const measure = (input: string) => {
+        const started = process.threadCpuUsage();
+        let elapsed = 0;
+        let count = 0;
+        let output = '';
+        do {
+          output = urlLink(input);
+          count++;
+          const cpu = process.threadCpuUsage(started);
+          elapsed = cpu.user + cpu.system;
+          expect(elapsed).toBeLessThan(1_000_000);
+        } while (elapsed < 20_000 && count < 16384);
+        expect(elapsed).toBeGreaterThan(0);
+        expect(output.length).toBeLessThanOrEqual(input.length * 12 + 8);
+        return elapsed / count;
+      };
+      measure(make(5_000));
+      const baseline = measure(make(5_000));
+      for (let size = 10_000; size <= 320_000; size *= 2) {
+        expect(measure(make(size)) / baseline).toBeLessThan(256);
+      }
+    }
+  });
+});
+
+describe('literal code', () => {
+  it.each([
+    ['HRSA-27-005', '`HRSA-27-005`'],
+    ['ID&42 <x> &amp;', '`ID&42 <x> &amp;`'],
+    ['a`b', '``a`b``'],
+    ['`a``b`', '``` `a``b` ```'],
+    [' value ', '`  value  `'],
+    ['   ', '`   `'],
+    ['a\r\nb\u2028c', '`a b c`'],
+    ['', ''],
+  ])('preserves code-span characters in %j', (input, expected) => {
+    expect(codeSpan(input)).toBe(expected);
+  });
+
+  it('adds only the single escape GFM consumes before a table pipe', () => {
+    for (let count = 0; count <= 8; count++) {
+      const slashes = '\\'.repeat(count);
+      expect(tableCodeSpan(`x${slashes}|y`)).toBe(`\`x${slashes}\\|y\``);
+    }
+    expect(tableCodeSpan('ID&amp;<x>`|')).toBe('``ID&amp;<x>`\\|``');
+  });
+
+  it.each(['\\', '`', '|', '\\|`', ' ', 'a'])(
+    'code CPU scaling %j',
+    { timeout: 30_000 },
+    (token) => {
+      for (const breaks of [false, true]) {
+        const make = (size: number) => {
+          const value = token.repeat(Math.ceil(size / token.length)).slice(0, size);
+          return `${breaks ? value.replace(/.{64}/g, '$&\n') : value}\n`;
+        };
+        const measure = (input: string) => {
+          const start = process.threadCpuUsage();
+          let elapsed = 0;
+          let count = 0;
+          let output = '';
+          do {
+            output = codeSpan(input) + tableCodeSpan(input);
+            count++;
+            const cpu = process.threadCpuUsage(start);
+            elapsed = cpu.user + cpu.system;
+            expect(elapsed).toBeLessThan(1_000_000);
+          } while (elapsed < 20_000 && count < 4096);
+          expect(elapsed).toBeGreaterThan(0);
+          expect(output.length).toBeLessThanOrEqual(input.length * 6 + 8);
+          return elapsed / count;
+        };
+        measure(make(5_000));
+        const baseline = measure(make(5_000));
+        for (let size = 10_000; size <= 320_000; size *= 2) {
+          expect(measure(make(size)) / baseline).toBeLessThan(256);
+        }
+      }
+    },
+  );
+});
 
 describe('inline', () => {
+  it('escapes HTML metacharacters in every agency-text slot', () => {
+    expect(inline('<img src=x> &copy;')).toBe('&lt;img src=x&gt; &amp;copy;');
+    expect(tableCell('<reference>|x')).toBe('&lt;reference&gt;\\|x');
+    expect(blockquote('<b>\n&copy;')).toBe('> &lt;b&gt;\n> &amp;copy;');
+  });
   it('flattens LF, CR, and CRLF to one space each', () => {
     expect(inline('a\nb')).toBe('a b');
     expect(inline('a\rb')).toBe('a b');
@@ -31,6 +141,36 @@ describe('inline', () => {
 });
 
 describe('tableCell', () => {
+  it.each(['\\', '\\|', '\\\\|'])('prose pipe CPU scaling %j', { timeout: 30_000 }, (token) => {
+    for (const breaks of [false, true]) {
+      const make = (size: number) => {
+        const value = token.repeat(Math.ceil(size / token.length)).slice(0, size);
+        return `${breaks ? value.replace(/.{64}/g, '$&\n') : value}\n`;
+      };
+      const measure = (input: string) => {
+        const started = process.threadCpuUsage();
+        let elapsed = 0;
+        let count = 0;
+        let output = '';
+        do {
+          output = tableCell(input);
+          count++;
+          const cpu = process.threadCpuUsage(started);
+          elapsed = cpu.user + cpu.system;
+          expect(elapsed).toBeLessThan(100_000);
+        } while (elapsed < 20_000 && count < 16384);
+        expect(elapsed).toBeGreaterThan(0);
+        expect(output.length).toBeLessThanOrEqual(input.length * 2 + 1);
+        return elapsed / count;
+      };
+      measure(make(5_000));
+      const baseline = measure(make(5_000));
+      for (let size = 10_000; size <= 320_000; size *= 2) {
+        expect(measure(make(size)) / baseline).toBeLessThan(256);
+      }
+    }
+  });
+
   it('escapes | so agency text cannot split the row', () => {
     expect(tableCell('A | B')).toBe('A \\| B');
     expect(tableCell('a|b|c')).toBe('a\\|b\\|c');

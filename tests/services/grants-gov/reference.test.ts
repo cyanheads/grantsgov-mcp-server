@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildReferenceSnapshot,
   encodeAgencyFilter,
+  querySubAgencyFacets,
   resolveAgencyScope,
 } from '@/services/grants-gov/reference.js';
 import { FACETS_ALL, FACETS_OPEN } from '../../fixtures/grants-gov.js';
@@ -21,6 +22,79 @@ const node = (code: string) => {
   if (!found) throw new Error(`No snapshot node for ${code}`);
   return found;
 };
+
+describe('querySubAgencyFacets', () => {
+  it('keeps snapshot fallback labels at their already-normalized decoding depth', () => {
+    const vocabulary = {
+      agencies: [
+        {
+          value: 'A',
+          subAgencyOptions: [{ value: 'A-B', label: '&amp;amp;lt;label&amp;amp;gt;', count: 1 }],
+        },
+      ],
+    };
+    const known = buildReferenceSnapshot(vocabulary, {}, FETCHED_AT);
+    expect(known.agencies.get('A-B')?.label).toBe('&lt;label&gt;');
+    expect(
+      querySubAgencyFacets(
+        { agencies: [{ value: 'A', subAgencyOptions: [{ value: 'A-B', count: 1 }] }] },
+        known,
+      ),
+    ).toEqual([{ code: 'A-B', label: '&lt;label&gt;', count: 1 }]);
+  });
+  it('rolls exact counts across multiple missing known levels, spaces, self rows and duplicates', () => {
+    const facets = {
+      agencies: [
+        {
+          value: 'DOT',
+          count: 7,
+          subAgencyOptions: [
+            { value: 'DOT', count: 1 },
+            { value: 'DOT-FAA', count: 2 },
+            { value: 'DOT-FAA-FAA COE-AJFE', count: 3 },
+            { value: 'DOT-FAA-FAA COE-AJFE', count: 300 },
+            { value: 'DOT-FTA - TPM', count: 2 },
+          ],
+        },
+      ],
+    };
+    const rows = querySubAgencyFacets(facets, snapshot);
+    expect(rows).toMatchObject([
+      { code: 'DOT-FAA', count: 5 },
+      { code: 'DOT-FAA-FAA COE', count: 3 },
+      { code: 'DOT-FAA-FAA COE-AJFE', count: 3 },
+      { code: 'DOT-FTA', count: 2 },
+      { code: 'DOT-FTA - TPM', count: 2 },
+    ]);
+    expect(rows.some((row) => row.code === 'DOT')).toBe(false);
+    expect(facets.agencies[0]?.count).toBe(7);
+    expect(querySubAgencyFacets({}, snapshot)).toEqual([]);
+  });
+
+  it('uses no global counts, invents no prefix code, and leaves snapshots unchanged across calls', () => {
+    const before = JSON.stringify([...snapshot.agencies]);
+    const result = querySubAgencyFacets(
+      {
+        agencies: [
+          {
+            value: 'HHS',
+            count: 3,
+            subAgencyOptions: [
+              { value: 'HHS-OS-ASPE', count: 3 },
+              { value: 'HHS-CDC-NCCDPHP', count: 0 },
+            ],
+          },
+        ],
+      },
+      snapshot,
+    );
+    expect(result).toMatchObject([
+      { code: 'HHS-CDC-NCCDPHP', count: 0 },
+      { code: 'HHS-OS-ASPE', count: 3 },
+    ]);
+    expect(JSON.stringify([...snapshot.agencies])).toBe(before);
+  });
+});
 
 describe('buildReferenceSnapshot — agency tree', () => {
   it('lists top-level agencies sorted, and records the fetch time', () => {

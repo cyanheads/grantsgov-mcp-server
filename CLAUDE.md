@@ -2,7 +2,7 @@
 
 **Server:** grantsgov-mcp-server (npm `@cyanheads/grantsgov-mcp-server`)
 **Version:** 0.1.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.14`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **Upstream:** Grants.gov legacy REST API (`https://api.grants.gov/v1/api`: `POST search2`, `POST fetchOpportunity`) — keyless, no env config
 
@@ -44,7 +44,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 | Tool | Upstream calls | Notes |
 |:-----|:---------------|:------|
 | `grantsgov_search_opportunities` | 1× `search2`; 1–4 pages of 500 for `closing_within_days`; 1–2 for `opportunity_number`; plus the cached reference snapshot when `agencies` / `eligibilities` / `funding_categories` is set | Three modes share one enrichment contract: plain upstream page, exact opportunity-number match paged locally, server-side closing-window scan |
-| `grantsgov_get_opportunity` | `search2` per opportunity number (resolution, all statuses), then `fetchOpportunity` per id, fanned out through the pacer | Up to 5 identifiers; misses and ambiguous numbers are `unresolved[]` entries, upstream failures throw the whole call |
+| `grantsgov_get_opportunity` | `search2` per selected opportunity number (all statuses), then `fetchOpportunity` per selected id, fanned out through the pacer | Accepts 50 nonblank entries per list / 50 unique combined; selects 5 identifiers before resolution, ids first; deferred arrays and executable continuation preserve section offsets. Six independent section pages; misses and ambiguity are `unresolved[]`, upstream failures throw |
 | `grantsgov_list_reference` | The reference snapshot (2× `search2` with `rows: 0`, cached 24 h), or none for `sort_options` / `keyword_syntax` | Every recovery hint for an unknown code routes here |
 
 No resources, no prompts, no DataCanvas — every record is reachable through `grantsgov_get_opportunity` (see the decisions log).
@@ -91,7 +91,9 @@ Each returns HTTP 200 with a plausible count, so the tool boundary maps the inpu
 
 ### Untrusted text
 
-Agency-authored text (titles, descriptions, eligibility narratives, contact blocks, file names, labels) is data. `html-to-text.ts` normalizes HTML and bare-entity text for both surfaces; `structuredContent` otherwise stays verbatim. In `format()`, use the `render.ts` helpers: `inline()` for text inside a line, `tableCell()` inside a table cell, `blockquote()` for multi-line fields. They split on every line break a renderer may honor (CR, LF, and the Unicode breaks U+000B, U+000C, U+0085, U+2028, U+2029), not just `\n`. Never interpolate raw upstream text into `content[]`, including ids and codes the upstream sends as strings. `html-to-text.ts` scans agency markup in linear time; keep any new pattern there free of a run that can rescan to the end of the text.
+Literal identifier slots use `codeSpan()` or `tableCodeSpan()` from `render.ts`, which choose a backtick fence and preserve literal characters. Never HTML-escape inside Markdown code spans. The table variant adds only the pipe escape consumed by GFM; existing backslashes stay literal.
+
+Agency-authored text (titles, descriptions, eligibility narratives, contact blocks, file names, labels) is data. `decodeEntities()` decodes at most two layers of HTML5 references in human-readable fields; identifiers and standalone URLs stay intact. `html-to-text.ts` then converts recognized narrative markup in a forward scan, preserving source newlines, comparisons, and non-HTML angle text. `structuredContent` carries the normalized text. In `format()`, use the HTML-escaping `render.ts` helpers: `inline()` for text inside a line, `tableCell()` inside a table cell, `blockquote()` for multi-line fields. They split on every line break a renderer may honor (CR, LF, and the Unicode breaks U+000B, U+000C, U+0085, U+2028, U+2029), not just `\n`. Never interpolate raw upstream text into `content[]`, including ids and codes the upstream sends as strings. Keep text processing bounded: no repeated stripping or decoding to stability, and no scan that revisits the remaining input for every opener.
 
 ---
 
@@ -101,7 +103,7 @@ Agency-authored text (titles, descriptions, eligibility narratives, contact bloc
 
 `src/mcp-server/tools/input-schemas.ts` holds the conventions every tool uses:
 
-- **Blank means unset.** `optionalText(schema)` and `optionalList(item, max)` read `''`, whitespace, and emptied lists as `undefined`. Never `.min(1)` on an optional string.
+- **Blank means unset.** `optionalText(schema)` and `optionalList(item, max)` read `''`, whitespace, and emptied lists as `undefined`. Lists advertise one whole string or an array without splitting. The helper rejects numeric scalars directly; MCP argument repair can normalize them for numeric identifiers and eligibility codes, so wire acceptance needs raw MCP checks. Blank cleanup precedes the nonblank-member bound; advertise no raw `maxItems` that rejects blank padding. Never `.min(1)` on an optional string.
 - **Advertise the raw form, validate the normalized one.** `normalizedString(raw, message, normalize, normalized)` builds `z.string().regex(raw).transform(normalize).pipe(normalized)`. `tools/list` emits only the first stage, so `raw` (built with `rawPattern()`, no regex flags) must admit every spelling the `.describe()` promises — any case, surrounding whitespace, blank. A `z.preprocess` in front of a pattern would advertise the post-normalization pattern, and a client validating against `tools/list` would reject `hhs`, `7`, or `"363423"` before the server sees them.
 - **Raw patterns fail in linear time.** The raw stage runs on the whole caller string (up to the 1 MiB HTTP body), so a `rawPattern` core starts and ends with non-whitespace and no two adjacent quantified runs may match the same character (`[A-Za-z0-9]+(?:[\s-]+[A-Za-z0-9]+)*`, not `[A-Za-z0-9](?:[A-Za-z0-9\s-]*[A-Za-z0-9])?`). Length caps go in the normalized stage, which `tools/list` does not advertise. `input-schemas.test.ts` times every advertised pattern against 100 KB adversarial strings.
 - Enum inputs keep their canonical `z.enum` behind a `trimLower` / `trimUpper` preprocess; digit-string numbers go through `numberFromDigits`.

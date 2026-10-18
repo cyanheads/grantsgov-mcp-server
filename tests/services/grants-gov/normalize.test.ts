@@ -189,6 +189,22 @@ describe('closeDateKind', () => {
 });
 
 describe('decodeEntities', () => {
+  it('preserves raw angle text and unterminated references', () => {
+    expect(decodeEntities('x < y; <reference>; &amp without terminator')).toBe(
+      'x < y; <reference>; &amp without terminator',
+    );
+  });
+
+  it('decodes HTML5 names exactly before legacy mixed-case aliases', () => {
+    expect(decodeEntities('&sect; &reg; &eacute; &Aacute; &aacute; &NotEqualTilde;')).toBe(
+      '§ ® é Á á ≂̸',
+    );
+    expect(decodeEntities('&constructor; &toString;')).toBe('&constructor; &toString;');
+  });
+
+  it('decodes two layers and stops before a third layer', () => {
+    expect(decodeEntities('&amp;nbsp; &amp;amp;sect;')).toBe('\xa0 &sect;');
+  });
   it('decodes the named set Grants.gov emits', () => {
     expect(decodeEntities('Alzheimer&rsquo;s &ldquo;Award&rdquo; &ndash; &mdash; &hellip;')).toBe(
       'Alzheimer’s “Award” – — …',
@@ -207,8 +223,8 @@ describe('decodeEntities', () => {
     expect(decodeEntities('&#8217; &#x2019; &#X2019; &#39;')).toBe("’ ’ ’ '");
   });
 
-  it('decodes a double-encoded entity once', () => {
-    expect(decodeEntities('&amp;rsquo;')).toBe('&rsquo;');
+  it('decodes a double-encoded entity twice', () => {
+    expect(decodeEntities('&amp;rsquo;')).toBe('’');
   });
 
   it('leaves unknown named entities and invalid code points as written', () => {

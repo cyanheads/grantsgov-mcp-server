@@ -12,7 +12,7 @@ import { getGrantsGovService } from '@/services/grants-gov/grants-gov-service.js
 import { resolveAgencyScope } from '@/services/grants-gov/reference.js';
 import type { ReferenceCode, ReferenceSnapshot } from '@/services/grants-gov/types.js';
 import { AGENCY_CODE_INPUT, optionalText, trimLower } from '../input-schemas.js';
-import { tableCell } from '../render.js';
+import { tableCell, tableCodeSpan } from '../render.js';
 
 const TOPICS = [
   'agencies',
@@ -408,7 +408,7 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
       {
         key: 'parent_code',
         header: 'Parent',
-        cell: (e) => (e.parent_code ? `\`${tableCell(e.parent_code)}\`` : ''),
+        cell: (e) => (e.parent_code ? tableCodeSpan(e.parent_code) : ''),
       },
       {
         key: 'has_children',
@@ -424,7 +424,7 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
       },
     ];
     const columns = [
-      { header: 'Code', cell: (e: Row) => `\`${tableCell(e.code)}\`` },
+      { header: 'Code', cell: (e: Row) => tableCodeSpan(e.code) },
       { header: 'Label', cell: (e: Row) => tableCell(e.label) },
       ...optionalColumns.filter(({ key }) => entries.some((entry) => entry[key] !== undefined)),
     ];
