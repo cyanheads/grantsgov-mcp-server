@@ -1,6 +1,6 @@
 # grantsgov-mcp-server - Directory Structure
 
-Generated on: 2026-10-08 12:23:50
+Generated on: 2026-10-18 19:26:30
 
 ```text
 grantsgov-mcp-server/
@@ -154,6 +154,7 @@ grantsgov-mcp-server/
 │   └── index.ts
 ├── tests/
 │   ├── fixtures/
+│   │   ├── grants-gov-detail-pages.json
 │   │   ├── grants-gov-records.ts
 │   │   ├── grants-gov.ts
 │   │   └── harness.ts

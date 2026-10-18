@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-10-18
+
+Readable opportunity records with complete bounded retrieval and query-scoped agency counts.
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-10-08
 
 Public hosted endpoint at grantsgov.caseyjhand.com, mcp-ts-core 0.13.14 (request IDs on tool errors, less internal detail in error data, string-boolean and null-optional argument repair), and a source-declared stateless session mode.
