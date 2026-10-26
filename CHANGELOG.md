@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-26
+
+Grant review guidance and complete reference paging.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-10-18
 
 Readable opportunity records with complete bounded retrieval and query-scoped agency counts.
