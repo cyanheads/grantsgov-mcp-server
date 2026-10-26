@@ -6,8 +6,8 @@
  * @module services/grants-gov/grants-gov-service
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, type McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { type Context, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import {
   createPacer,
   httpErrorFromResponse,
@@ -23,7 +23,6 @@ import type {
   RawDetail,
   RawFacets,
   RawHit,
-  RawSearchData,
   ReferenceSnapshot,
   Search2Body,
   SearchResult,
@@ -50,7 +49,7 @@ const PER_ATTEMPT_TIMEOUT_MS = 15_000;
 const REFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
 const REFRESH_FAILURE_BACKOFF_MS = 60_000;
 const SCAN_PAGE_SIZE = 500;
-/** Rows the closing-window scan reads before it stops (the whole posted universe is under 1,000). */
+/** Maximum rows read by one closing-window scan. */
 export const SCAN_CEILING = 2_000;
 const RESOLVE_ROWS = 10;
 
@@ -164,8 +163,71 @@ function parseEnvelope(text: string, endpoint: Endpoint): Record<string, unknown
   return envelope.data;
 }
 
-function toSearchResult(text: string): SearchResult {
+/** Search rows may be sparse, but each must carry an actionable retrieval id and known lifecycle. */
+const SearchHit = z.object({
+  id: z
+    .union([z.string().trim().regex(/^\d+$/), z.number().int().positive()])
+    .refine((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0)
+    .transform(String),
+  oppStatus: z.string().refine((value) => STATUSES.includes(value.toLowerCase() as Status)),
+  docType: z.string().refine((value) => ['synopsis', 'forecast'].includes(value.toLowerCase())),
+  number: z.string().nullish(),
+  title: z.string().nullish(),
+  agency: z.string().nullish(),
+  agencyCode: z.string().nullish(),
+  openDate: z.string().nullish(),
+  closeDate: z.string().nullish(),
+  cfdaList: z.array(z.string()).nullish(),
+});
+const FacetOption = z.object({
+  value: z.string().nullish(),
+  label: z.string().nullish(),
+  count: z.number().nullish(),
+});
+const SearchData = z.object({
+  hitCount: z.number().int().nonnegative(),
+  oppHits: z.array(SearchHit).nullish(),
+  oppStatusOptions: z.array(FacetOption).nullish(),
+  eligibilities: z.array(FacetOption).nullish(),
+  fundingCategories: z.array(FacetOption).nullish(),
+  fundingInstruments: z.array(FacetOption).nullish(),
+  agencies: z
+    .array(FacetOption.extend({ subAgencyOptions: z.array(FacetOption).nullish() }))
+    .nullish(),
+});
+
+/** Resolution accepts sparse lifecycle metadata and validates every field displayed for ambiguous matches. */
+const NumberSearchData = SearchData.extend({
+  oppHits: z
+    .array(
+      SearchHit.omit({ docType: true, cfdaList: true }).extend({
+        oppStatus: z.string().nullish(),
+      }),
+    )
+    .nullish(),
+});
+
+function toSearchResult(
+  text: string,
+  body: Search2Body,
+  schema: typeof SearchData | typeof NumberSearchData = SearchData,
+): SearchResult {
   const data = parseEnvelope(text, 'search2');
+  const parsed = schema.safeParse(data);
+  if (
+    !parsed.success ||
+    (parsed.data.oppHits == null &&
+      parsed.data.hitCount > 0 &&
+      body.rows !== 0 &&
+      (body.startRecordNum ?? 0) < parsed.data.hitCount)
+  ) {
+    throw serviceUnavailable(
+      typeof data.hitCount !== 'number'
+        ? 'Grants.gov search2 returned no hit count.'
+        : 'Grants.gov search2 returned a malformed search page.',
+      { reason: 'upstream_unavailable', retryable: false },
+    );
+  }
   const {
     hitCount,
     oppHits,
@@ -174,9 +236,7 @@ function toSearchResult(text: string): SearchResult {
     fundingCategories,
     fundingInstruments,
     agencies,
-  } = data as RawSearchData;
-  if (typeof hitCount !== 'number')
-    throw upstreamUnavailable('Grants.gov search2 returned no hit count.');
+  } = parsed.data;
   const facets: RawFacets = {
     oppStatusOptions,
     eligibilities,
@@ -217,7 +277,7 @@ export class GrantsGovService {
 
   /** One `search2` call. */
   search(body: Search2Body, ctx: Context): Promise<SearchResult> {
-    return this.post('search2', body, (_status, text) => toSearchResult(text), ctx);
+    return this.post('search2', body, (_status, text) => toSearchResult(text, body), ctx);
   }
 
   /** One `fetchOpportunity` call, revision history stripped. A miss is `not_found`, never thrown. */
@@ -233,14 +293,14 @@ export class GrantsGovService {
    */
   async resolveNumber(opportunityNumber: string, ctx: Context): Promise<NumberResolution> {
     const exactMatches = async (sent: string) => {
-      const { hits } = await this.search(
-        { oppNum: quoteOppNum(sent), oppStatuses: ALL_STATUSES, rows: RESOLVE_ROWS },
+      const body = { oppNum: quoteOppNum(sent), oppStatuses: ALL_STATUSES, rows: RESOLVE_ROWS };
+      const { hits } = await this.post(
+        'search2',
+        body,
+        (_status, text) => toSearchResult(text, body, NumberSearchData),
         ctx,
       );
-      return hits.filter(
-        (hit) =>
-          isSameOpportunityNumber(hit.number, opportunityNumber) && /^\d+$/.test(hit.id ?? ''),
-      );
+      return hits.filter((hit) => isSameOpportunityNumber(hit.number, opportunityNumber));
     };
     let matches = await exactMatches(opportunityNumber);
     if (matches.length === 0 && /[a-z]/.test(opportunityNumber)) {
@@ -256,7 +316,7 @@ export class GrantsGovService {
    * Scans posted opportunities in close-date order for those closing between
    * today (ET) and `cutoffDate` inclusive. Pages of 500, each cut by
    * {@link cutClosingWindow}; stops at the first row with a blank or later close
-   * date, on a short page, or at 2,000 rows.
+   * date, on a short page, or at 2,000 rows. All pages share one 25-second deadline.
    */
   async scanClosingWindow(
     body: Search2Body,
@@ -267,71 +327,116 @@ export class GrantsGovService {
     const windowHits: RawHit[] = [];
     let facets: RawFacets = {};
     let postedTotal = 0;
+    const deadline = new AbortController();
+    const deadlineTimer = setTimeout(
+      () =>
+        deadline.abort(
+          upstreamUnavailable('Grants.gov closing-window scan exceeded its operation deadline.'),
+        ),
+      25_000,
+    );
+    const scanContext: Context = { ...ctx, signal: AbortSignal.any([ctx.signal, deadline.signal]) };
 
-    for (let start = 0; start < SCAN_CEILING; start += SCAN_PAGE_SIZE) {
-      ctx.signal.throwIfAborted();
-      const page = await this.search(
-        {
-          ...body,
-          oppStatuses: 'posted',
-          sortBy: 'closeDate|asc',
-          rows: SCAN_PAGE_SIZE,
-          startRecordNum: start,
-        },
-        ctx,
-      );
-      if (start === 0) {
-        facets = page.facets;
-        postedTotal = page.hitCount;
+    try {
+      for (let start = 0; start < SCAN_CEILING; start += SCAN_PAGE_SIZE) {
+        scanContext.signal.throwIfAborted();
+        const page = await this.search(
+          {
+            ...body,
+            oppStatuses: 'posted',
+            sortBy: 'closeDate|asc',
+            rows: SCAN_PAGE_SIZE,
+            startRecordNum: start,
+          },
+          scanContext,
+        );
+        if (start === 0) {
+          facets = page.facets;
+          postedTotal = page.hitCount;
+        }
+        const cut = cutClosingWindow(page.hits, today, cutoffDate);
+        windowHits.push(...cut.windowHits);
+        if (cut.nextCloseAfterWindow) {
+          return {
+            windowHits,
+            postedTotal,
+            facets,
+            nextCloseAfterWindow: cut.nextCloseAfterWindow,
+            ceilingHit: false,
+          };
+        }
+        if (page.hits.length < SCAN_PAGE_SIZE || start + page.hits.length >= postedTotal)
+          return { windowHits, postedTotal, facets, ceilingHit: false };
       }
-      const cut = cutClosingWindow(page.hits, today, cutoffDate);
-      windowHits.push(...cut.windowHits);
-      if (cut.nextCloseAfterWindow) {
-        return {
-          windowHits,
-          postedTotal,
-          facets,
-          nextCloseAfterWindow: cut.nextCloseAfterWindow,
-          ceilingHit: false,
-        };
-      }
-      if (page.hits.length < SCAN_PAGE_SIZE)
-        return { windowHits, postedTotal, facets, ceilingHit: false };
+      ctx.log.info('Closing-window scan reached its row ceiling', {
+        ceiling: SCAN_CEILING,
+        cutoffDate,
+      });
+      return { windowHits, postedTotal, facets, ceilingHit: true };
+    } finally {
+      clearTimeout(deadlineTimer);
     }
-    ctx.log.info('Closing-window scan reached its row ceiling', {
-      ceiling: SCAN_CEILING,
-      cutoffDate,
-    });
-    return { windowHits, postedTotal, facets, ceilingHit: true };
   }
 
   /**
    * The reference snapshot, cached in-process for 24 h behind one in-flight
    * build. A failed refresh serves the previous snapshot when one exists, and
    * keeps serving it without re-contacting Grants.gov for a minute after the
-   * failure. A failure with no snapshot to fall back on throws to every waiting
-   * caller; each tool's contract fills its own recovery hint from the reason.
+   * failure, with sanitized cache provenance. Each waiter owns its cancellation;
+   * the shared build continues for other callers. A cold-cache failure throws to
+   * each waiter, whose tool contract supplies its own recovery hint.
    */
   async getReference(ctx: Context): Promise<ReferenceSnapshot> {
+    ctx.signal.throwIfAborted();
     const cached = this.reference;
     const now = Date.now();
     if (cached && (now - cached.fetchedAtMs < REFERENCE_TTL_MS || now < this.refreshBlockedUntilMs))
       return cached.snapshot;
 
-    this.referenceInflight ??= this.buildReference(ctx).finally(() => {
-      this.referenceInflight = undefined;
-    });
-    try {
-      return await this.referenceInflight;
-    } catch (err) {
-      if (!cached) throw err;
-      this.refreshBlockedUntilMs = Date.now() + REFRESH_FAILURE_BACKOFF_MS;
-      ctx.log.warning('Grants.gov reference refresh failed; serving the previous snapshot', {
-        snapshotDate: cached.snapshot.fetchedAt,
-        error: err instanceof Error ? err.message : String(err),
+    this.referenceInflight ??= this.buildReference(ctx)
+      .catch((err: unknown) => {
+        const reason = err instanceof McpError ? err.data?.reason : undefined;
+        if (
+          !cached ||
+          (reason !== 'upstream_unavailable' &&
+            reason !== 'upstream_route_unavailable' &&
+            reason !== 'rate_limited')
+        )
+          throw err;
+        this.refreshBlockedUntilMs = Date.now() + REFRESH_FAILURE_BACKOFF_MS;
+        const snapshot: ReferenceSnapshot = {
+          ...cached.snapshot,
+          cache: {
+            status: 'stale',
+            reason,
+            retry_after: new Date(this.refreshBlockedUntilMs).toISOString(),
+          },
+        };
+        this.reference = { ...cached, snapshot };
+        ctx.log.warning('Grants.gov reference refresh failed; serving the previous snapshot', {
+          snapshotDate: snapshot.fetchedAt,
+          reason,
+        });
+        return snapshot;
+      })
+      .finally(() => {
+        this.referenceInflight = undefined;
       });
-      return cached.snapshot;
-    }
+    const pending = this.referenceInflight;
+    return await new Promise<ReferenceSnapshot>((resolve, reject) => {
+      const abort = () => reject(ctx.signal.reason);
+      ctx.signal.addEventListener('abort', abort, { once: true });
+      pending.then(
+        (snapshot) => {
+          ctx.signal.removeEventListener('abort', abort);
+          resolve(snapshot);
+        },
+        (error: unknown) => {
+          ctx.signal.removeEventListener('abort', abort);
+          reject(error);
+        },
+      );
+    });
   }
 
   /** Clears the pacer's timer and rejects queued requests. Call from `createApp({ teardown })`. */
@@ -346,7 +451,7 @@ export class GrantsGovService {
    */
   private async buildReference(ctx: Context): Promise<ReferenceSnapshot> {
     const facetsOnly = (body: Search2Body) =>
-      this.post('search2', body, (_status, text) => toSearchResult(text), ctx, {
+      this.post('search2', body, (_status, text) => toSearchResult(text, body), ctx, {
         detached: true,
       });
     const [all, open] = await Promise.all([
@@ -356,6 +461,7 @@ export class GrantsGovService {
     const fetchedAt = new Date();
     const snapshot = buildReferenceSnapshot(all.facets, open.facets, fetchedAt.toISOString());
     this.reference = { snapshot, fetchedAtMs: fetchedAt.getTime() };
+    this.refreshBlockedUntilMs = 0;
     ctx.log.debug('Grants.gov reference snapshot built', {
       agencies: snapshot.agencies.size,
       eligibilities: snapshot.eligibilities.length,

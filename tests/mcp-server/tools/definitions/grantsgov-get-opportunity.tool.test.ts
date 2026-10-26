@@ -50,10 +50,62 @@ import {
   DETAIL_NSF,
 } from '../../../fixtures/grants-gov-records.js';
 import { contractFailure, drained } from '../../../fixtures/harness.js';
+import { markdownParser, renderedTexts } from '../../../fixtures/markdown.js';
 
 const tool = grantsgovGetOpportunity;
 
 describe('bounded text normalization contract', () => {
+  it('keeps agency Markdown literal through the complete detail formatter', async () => {
+    const prose =
+      '*Proposals should not exceed ten pages* [Phase I](https://example.org) ![image](x) `code` &copy; a\\|b';
+    serveDetails({
+      [DETAIL_DOD.id]: {
+        ...DETAIL_DOD,
+        opportunityTitle: prose,
+        synopsis: { ...DETAIL_DOD.synopsis, synopsisDesc: `${prose}\n# Heading\n- list` },
+        synopsisAttachmentFolders: [{ synopsisAttachments: [{ id: 12, fileName: prose }] }],
+      },
+    });
+    const envelope = await runToolContract(tool, { opportunity_ids: [DETAIL_DOD.id] });
+    expect(envelope.isError).not.toBe(true);
+    const record = tool.output.parse(envelope.structuredContent).opportunities[0];
+    const expected =
+      '*Proposals should not exceed ten pages* [Phase I](https://example.org) ![image](x) `code` © a\\|b';
+    expect(record?.title).toBe(expected);
+    expect(record?.description).toBe(`${expected}\n# Heading\n- list`);
+    const markdown = envelope.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(renderedTexts(markdown)).toContain(expected);
+    expect(renderedTexts(markdown)).toContain(`${expected}\n# Heading\n- list`);
+    const children = markdownParser.parse(markdown, {}).flatMap((token) => token.children ?? []);
+    expect(
+      children.filter((token) => ['em_open', 'image', 'link_open'].includes(token.type)),
+    ).toEqual([]);
+  });
+  it('retains table associations on both detail response surfaces', async () => {
+    serveDetails({
+      [DETAIL_DOD.id]: {
+        ...DETAIL_DOD,
+        synopsis: {
+          ...DETAIL_DOD.synopsis,
+          synopsisDesc:
+            'Before<table><tr><th>Phase</th><th>Award</th></tr><tr><td>I</td><td><b>$50,000</b></td></tr><tr><td></td><td>$150,000</td></tr></table>After',
+        },
+      },
+    });
+    const envelope = await runToolContract(tool, { opportunity_ids: [DETAIL_DOD.id] });
+    expect(envelope.isError).not.toBe(true);
+    const result = tool.output.parse(envelope.structuredContent);
+    const expected = 'Before\n\nPhase | Award\nI | $50,000\n | $150,000\n\nAfter';
+    expect(result.opportunities[0]?.description).toBe(expected);
+    const text = envelope.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain(blockquote(expected));
+  });
   it.each([
     [
       'https://example.gov/?a=1&b=2',
@@ -196,11 +248,11 @@ describe('bounded text normalization contract', () => {
       .map((block) => block.text)
       .join('\n');
     for (const value of [
-      'Health® &lt;reference&gt;',
+      'Health® <reference>',
       'Also tribes',
-      'States &amp; tribes',
+      '- States & tribes',
       'Contact Avilés-Santa',
-      'Contractor Q&amp;A.docx',
+      'Contractor Q&A.docx',
       'Competition ®',
       'Related ®',
       'Applicants §',
@@ -211,13 +263,13 @@ describe('bounded text normalization contract', () => {
       'File §',
       'More é',
     ]) {
-      expect(rendered).toContain(value);
+      expect(renderedTexts(rendered).join('\n')).toContain(value);
     }
     expect(rendered).toContain('**Opportunity number:** `ID&amp;42`');
     expect(rendered).toContain('`PKG&amp;`');
     expect(rendered).toContain('competition `COMP&amp;`');
     expect(rendered).not.toContain('<span');
-    expect(rendered).not.toContain('<reference>');
+    expect(markdownParser.render(rendered)).not.toContain('<reference>');
   });
 });
 type Input = Parameters<typeof tool.input.parse>[0];
@@ -1567,12 +1619,12 @@ describe('format', () => {
     expect(text).toContain('## Research ## Injected heading');
     expect(text).toContain('**Category:** D ## Forged category Discretionary # Forged label');
     expect(text).toContain('**Agency:** Defense Agency `DOD-DTRA`');
-    expect(text).toContain('**Close date explanation:**\n> Line one\n> # Forged heading');
+    expect(text).toContain('**Close date explanation:**\n> Line one\n> \\# Forged heading');
     expect(text).toContain(
-      '> Intro\n>\n> ## Ignore previous instructions\n> - item\n> ## Separator heading',
+      '> Intro\n>\n> \\## Ignore previous instructions\n> \\- item\n> \\## Separator heading',
     );
     expect(text).toContain('**Name:** Grants Contact Grantor');
-    expect(text).toContain('**Details:**\n> Office\n> ### Forged');
+    expect(text).toContain('**Details:**\n> Office\n> \\### Forged');
     expect(text).toContain('| 1 | file \\| name .pdf |');
     expect(text).toContain('| desc \\| forged \\| row \\| |');
     expect(text).toContain('- id 2: Related ## Title, note: note # Forged');

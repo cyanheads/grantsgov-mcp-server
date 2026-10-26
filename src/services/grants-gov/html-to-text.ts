@@ -65,17 +65,20 @@ interface ListFrame {
  *   (`1. ` inside `ol`), `a href` → `text (url)`, other recognized tags stripped with
  *   its text kept (`script`/`style` content dropped).
  * - At most two entity layers decoded before the forward markup scan.
+ * - Table cells are separated by ` | `; rows break lines and tables break paragraphs.
  * - `&nbsp;` and interior whitespace runs collapse to one space; leading
  *   indentation is kept; each line is right-trimmed; 3+ newlines collapse to one
  *   blank line.
  */
 export function htmlToText(input: string): string {
   const lists: ListFrame[] = [];
+  const tables: { cells: number }[] = [];
   const links: { url: string | undefined; start: number }[] = [];
   let waitingForText: { start: number }[] = [];
   let textEnd = 0;
   let out = '';
   let cursor = 0;
+  let endsInNewline = false;
 
   /** Resolve each link's trimmed start once, without rescanning nested link text. */
   const append = (chunk: string) => {
@@ -86,6 +89,7 @@ export function htmlToText(input: string): string {
       textEnd = out.length + chunk.trimEnd().length;
     }
     out += chunk;
+    if (chunk.length > 0) endsInNewline = chunk.endsWith('\n');
   };
 
   const source = stripHidden(decodeEntities(input).replace(/\r\n?/g, '\n'));
@@ -98,6 +102,24 @@ export function htmlToText(input: string): string {
     const closing = match[1] === '/';
 
     switch (name) {
+      case 'table':
+        if (closing) tables.pop();
+        else tables.push({ cells: 0 });
+        append('\n\n');
+        break;
+      case 'tr': {
+        const table = tables.at(-1);
+        if (table) table.cells = 0;
+        if (!endsInNewline) append('\n');
+        break;
+      }
+      case 'td':
+      case 'th': {
+        if (closing) break;
+        const table = tables.at(-1);
+        if (table && table.cells++ > 0) append(' | ');
+        break;
+      }
       case 'br':
         append('\n');
         break;

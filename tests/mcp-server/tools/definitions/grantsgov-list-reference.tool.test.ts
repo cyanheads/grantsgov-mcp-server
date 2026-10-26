@@ -14,7 +14,7 @@ import {
   getEnrichment,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { grantsgovListReference } from '@/mcp-server/tools/definitions/grantsgov-list-reference.tool.js';
 import { grantsgovSearchOpportunities } from '@/mcp-server/tools/definitions/grantsgov-search-opportunities.tool.js';
 import {
@@ -23,6 +23,7 @@ import {
 } from '@/services/grants-gov/grants-gov-service.js';
 import { json, ok, referenceRoute, SEARCH2_URL, searchData } from '../../../fixtures/grants-gov.js';
 import { contractFailure, drained } from '../../../fixtures/harness.js';
+import { renderedTexts } from '../../../fixtures/markdown.js';
 
 const tool = grantsgovListReference;
 
@@ -61,7 +62,7 @@ describe('entity text contract', () => {
       .filter((block) => block.type === 'text')
       .map((block) => block.text)
       .join('\n');
-    expect(rendered).toContain('Leaf § &lt;reference&gt;');
+    expect(renderedTexts(rendered)).toContain('Leaf § <reference>');
     const literal =
       tool.format?.({
         topic: 'agencies',
@@ -90,6 +91,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   getGrantsGovService().dispose();
   http.restore();
 });
@@ -121,14 +123,14 @@ describe('static topics', () => {
       'agency_desc',
     ]);
     expect(result.snapshot_date).toBeUndefined();
-    expect(enrichment).toEqual({ totalCount: 9 });
+    expect(enrichment).toEqual({ totalCount: 9, shown: 9, cap: 50, truncated: false });
     expect(http.calls).toHaveLength(0);
   });
 
   it('lists keyword syntax and filters it with name_contains', async () => {
     const { result, enrichment } = await run({ topic: 'keyword_syntax', name_contains: 'phrase' });
     expect(codes(result.entries)).toEqual(['"phrase"']);
-    expect(enrichment).toEqual({ totalCount: 1 });
+    expect(enrichment).toEqual({ totalCount: 1, shown: 1, cap: 50, truncated: false });
     expect(http.calls).toHaveLength(0);
   });
 });
@@ -157,7 +159,7 @@ describe('snapshot-backed topics', () => {
       open_count: 883,
       total_count: 29418,
     });
-    expect(enrichment).toEqual({ totalCount: 4 });
+    expect(enrichment).toEqual({ totalCount: 4, shown: 4, cap: 50, truncated: false });
   });
 
   it('lists funding categories and instruments', async () => {
@@ -223,6 +225,9 @@ describe('agencies', () => {
     expect(result.entries).toEqual([]);
     expect(enrichment).toEqual({
       totalCount: 0,
+      shown: 0,
+      cap: 50,
+      truncated: false,
       notice:
         'No agencies entry matched "zzzz". Try a shorter name or a single distinctive word, or call grantsgov_list_reference with topic agencies and no name_contains to browse the full list.',
     });
@@ -239,7 +244,7 @@ describe('agencies', () => {
       'DOT-FAA-FAA COE-GACOE',
     ]);
     expect(result.entries.every((entry) => entry.parent_code !== undefined)).toBe(true);
-    expect(enrichment).toEqual({ totalCount: 6 });
+    expect(enrichment).toEqual({ totalCount: 6, shown: 6, cap: 50, truncated: false });
   });
 
   it('counts a mid-level agency over its subtree, matching an agencies search on it', async () => {
@@ -294,6 +299,9 @@ describe('agencies', () => {
     expect(result.entries).toEqual([]);
     expect(enrichment).toEqual({
       totalCount: 0,
+      shown: 0,
+      cap: 50,
+      truncated: false,
       notice:
         'NSF has no sub-agencies. Pass it directly as an agencies filter to grantsgov_search_opportunities.',
     });
@@ -317,6 +325,21 @@ describe('agencies', () => {
 });
 
 describe('input schema', () => {
+  it('accepts limits through 1000 and rejects invalid page arguments', () => {
+    expect(tool.input.parse({ topic: 'agencies', limit: 1000, offset: 1 })).toMatchObject({
+      limit: 1000,
+      offset: 1,
+    });
+    for (const raw of [
+      { limit: 0 },
+      { limit: 1001 },
+      { limit: 1.5 },
+      { offset: -1 },
+      { offset: 0.5 },
+    ]) {
+      expect(() => tool.input.parse({ topic: 'agencies', ...raw })).toThrow();
+    }
+  });
   it('rejects a malformed parent_code at the schema', () => {
     expect(() => tool.input.parse({ topic: 'agencies', parent_code: 'HHS*' })).toThrow();
     expect(() => tool.input.parse({ topic: 'agencies', parent_code: '-HHS' })).toThrow();
@@ -326,6 +349,119 @@ describe('input schema', () => {
     expect(() => tool.input.parse({ topic: 'agency' })).toThrow();
     expect(() => tool.input.parse({ topic: 'AGENCY' })).toThrow();
     expect(() => tool.input.parse({ topic: 'agencies', name_contains: 'x'.repeat(101) })).toThrow();
+  });
+});
+
+describe('reference paging', () => {
+  beforeEach(() => {
+    http.route(referenceRoute());
+  });
+
+  it.each([
+    'agencies',
+    'eligibilities',
+    'funding_categories',
+    'funding_instruments',
+    'statuses',
+    'sort_options',
+    'keyword_syntax',
+  ])('reconstructs every %s entry through executable continuation', async (topic) => {
+    const whole = await runToolContract(tool, { topic, limit: 100 });
+    const expected = tool.output.parse(whole.structuredContent).entries;
+    const collected = [];
+    let args = { topic, limit: 2 };
+    for (;;) {
+      const envelope = await runToolContract(tool, args);
+      expect(envelope.isError).not.toBe(true);
+      const result = tool.output.parse(envelope.structuredContent);
+      expect(envelope.structuredContent).toMatchObject({
+        totalCount: expected.length,
+        shown: result.entries.length,
+        truncated: collected.length + result.entries.length < expected.length,
+        cap: 2,
+      });
+      collected.push(...result.entries);
+      const text = envelope.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      for (const entry of result.entries) expect(renderedTexts(text)).toContain(entry.label);
+      if (!result.continuation) break;
+      expect(text).toContain(JSON.stringify(result.continuation));
+      args = result.continuation;
+    }
+    expect(collected).toEqual(expected);
+    const past = await runToolContract(tool, { topic, offset: 999 });
+    expect(past.structuredContent).toMatchObject({
+      entries: [],
+      totalCount: expected.length,
+      shown: 0,
+      truncated: false,
+      notice: expect.stringContaining('offset'),
+    });
+  });
+
+  it('filters the complete nested scope before paging and preserves continuation filters', async () => {
+    const first = await runToolContract(tool, {
+      topic: 'agencies',
+      parent_code: 'DOT',
+      name_contains: 'coe',
+      limit: 2,
+    });
+    expect(first.structuredContent).toMatchObject({
+      totalCount: 4,
+      shown: 2,
+      truncated: true,
+      continuation: {
+        topic: 'agencies',
+        parent_code: 'DOT',
+        name_contains: 'coe',
+        limit: 2,
+        offset: 2,
+      },
+    });
+    const page = tool.output.parse(first.structuredContent);
+    if (!page.continuation)
+      throw new Error('Expected a continuation for the remaining nested agencies');
+    const next = await runToolContract(tool, page.continuation);
+    expect(tool.output.parse(next.structuredContent).entries.map((entry) => entry.code)).toEqual([
+      'DOT-FAA-FAA COE-FAA JAMS',
+      'DOT-FAA-FAA COE-GACOE',
+    ]);
+  });
+
+  it('defaults to 50, clamps over-cap requests with a notice, and preserves all entries', async () => {
+    http.reset();
+    http.route({
+      method: 'POST',
+      match: SEARCH2_URL,
+      respond: () =>
+        ok(
+          searchData([], 0, {
+            agencies: Array.from({ length: 125 }, (_, i) => ({
+              value: `A${String(i).padStart(3, '0')}`,
+              label: `Agency ${i}`,
+              count: i,
+            })),
+          }),
+        ),
+    });
+    const first = await runToolContract(tool, { topic: 'agencies' });
+    expect(first.structuredContent).toMatchObject({
+      totalCount: 125,
+      shown: 50,
+      truncated: true,
+      cap: 50,
+      continuation: { topic: 'agencies', limit: 50, offset: 50 },
+    });
+    const capped = await runToolContract(tool, { topic: 'agencies', limit: 1000 });
+    expect(capped.structuredContent).toMatchObject({
+      totalCount: 125,
+      shown: 100,
+      cap: 100,
+      notice: expect.stringContaining('100'),
+      continuation: { topic: 'agencies', limit: 100, offset: 100 },
+    });
   });
 });
 
@@ -418,6 +554,44 @@ describe('error contract', () => {
 describe('production envelope (runToolContract)', () => {
   beforeEach(() => {
     http.route(referenceRoute());
+  });
+
+  it('discloses stale provenance throughout backoff and clears it after refresh', async () => {
+    const healthy = await runToolContract(tool, { topic: 'agencies', name_contains: 'zzzz' });
+    const date = (healthy.structuredContent as { snapshot_date: string }).snapshot_date;
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 25 * 60 * 60 * 1000);
+    http.reset();
+    http.route({
+      method: 'POST',
+      match: SEARCH2_URL,
+      respond: json({ message: 'secret endpoint' }, 403),
+    });
+    for (let i = 0; i < 2; i++) {
+      const stale = await runToolContract(tool, { topic: 'agencies', name_contains: 'zzzz' });
+      expect(stale.structuredContent).toMatchObject({
+        snapshot_date: date,
+        reference_cache: {
+          status: 'stale',
+          reason: 'upstream_route_unavailable',
+          retry_after: expect.any(String),
+        },
+        notice: expect.stringContaining('No agencies entry matched'),
+      });
+      const text = stale.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      expect(text).toContain('upstream_route_unavailable');
+      expect(text).toContain('stale');
+      expect(text).not.toContain('secret endpoint');
+    }
+    expect(http.calls).toHaveLength(2);
+    clock.mockReturnValue(now + 26 * 60 * 60 * 1000);
+    http.reset();
+    http.route(referenceRoute());
+    const refreshed = await runToolContract(tool, { topic: 'agencies' });
+    expect(refreshed.structuredContent).not.toHaveProperty('reference_cache');
   });
 
   it('parses a zero-result page against output + enrichment', async () => {

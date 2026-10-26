@@ -69,6 +69,62 @@ async function rejection(call: () => Promise<unknown>): Promise<McpError> {
 }
 
 describe('search', () => {
+  it.each([
+    [{ rows: 25 }, { hitCount: 0 }],
+    [{ rows: 0 }, { hitCount: 7 }],
+    [{ rows: 25, startRecordNum: 7 }, { hitCount: 7 }],
+    [{ rows: 25 }, { hitCount: 0, oppHits: null }],
+    [{ rows: 0 }, { hitCount: 7, oppHits: null }],
+    [
+      { rows: 25, startRecordNum: 7 },
+      { hitCount: 7, oppHits: null },
+    ],
+  ])('preserves omitted arrays in proven empty contexts %j', async (body, data) => {
+    route(SEARCH2_URL, ok(data));
+    expect((await service.search(body, ctxFor())).hits).toEqual([]);
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it.each([
+    { hitCount: 3 },
+    { hitCount: -1, oppHits: [] },
+    { hitCount: 1.5, oppHits: [] },
+    { hitCount: 3, oppHits: {} },
+    { hitCount: 1, oppHits: [null] },
+    { hitCount: 2, oppHits: [HRSA_HIT, { ...HRSA_HIT, id: null }] },
+    { hitCount: 1, oppHits: [{ ...HRSA_HIT, id: null }] },
+    { hitCount: 1, oppHits: [{ ...HRSA_HIT, id: 'abc' }] },
+    { hitCount: 1, oppHits: [{ ...HRSA_HIT, id: '0' }] },
+    { hitCount: 1, oppHits: [{ ...HRSA_HIT, id: '9007199254740992' }] },
+    { hitCount: 1, oppHits: [{ ...HRSA_HIT, title: {} }] },
+    { hitCount: 1, oppHits: [{ ...HRSA_HIT, oppStatus: 'unknown' }] },
+    { hitCount: 1, oppHits: [{ ...HRSA_HIT, cfdaList: [42] }] },
+    { hitCount: 0, oppHits: [], agencies: [{ subAgencyOptions: [null] }] },
+  ])('rejects corrupt complete pages once: %j', async (data) => {
+    route(SEARCH2_URL, ok(data));
+    const error = await rejection(() => service.search({ rows: 25 }, ctxFor()));
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.data).toMatchObject({ reason: 'upstream_unavailable', retryable: false });
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('keeps sparse optional fields and normalizes harmless numeric ID forms', async () => {
+    route(
+      SEARCH2_URL,
+      ok({
+        hitCount: 2,
+        oppHits: [
+          { id: ' 00042 ', oppStatus: 'POSTED', docType: 'SYNOPSIS', closeDate: null },
+          { id: 43, oppStatus: 'posted', docType: 'synopsis' },
+        ],
+      }),
+    );
+    const result = await service.search({}, ctxFor());
+    expect(result.hits).toEqual([
+      { id: '00042', oppStatus: 'POSTED', docType: 'SYNOPSIS', closeDate: null },
+      { id: '43', oppStatus: 'posted', docType: 'synopsis' },
+    ]);
+  });
   it('POSTs the body verbatim as JSON and returns hits and facets', async () => {
     route(SEARCH2_URL, ok(searchData(POSTED_HITS, 940, FACETS_OPEN)));
     const body = { keyword: 'rural AND broadband', oppStatuses: 'posted', rows: 25 };
@@ -322,6 +378,31 @@ describe('fetchOpportunity', () => {
 });
 
 describe('resolveNumber', () => {
+  it.each(['title', 'agency', 'agencyCode', 'openDate', 'closeDate'])(
+    'rejects malformed candidate display field %s',
+    async (field) => {
+      route(SEARCH2_URL, ok({ hitCount: 2, oppHits: [HRSA_HIT, { ...HRSA_HIT, [field]: {} }] }));
+      const error = await rejection(() => service.resolveNumber('HRSA-27-005', ctxFor()));
+      expect(error.data).toMatchObject({ reason: 'upstream_unavailable', retryable: false });
+      expect(http.calls).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    { id: '42', number: 'SPARSE-1' },
+    { id: '42', number: 'SPARSE-1', oppStatus: 'future-status', docType: 'future-document' },
+  ])(
+    'resolves a unique sparse number without requiring unused lifecycle fields: %j',
+    async (hit) => {
+      route(SEARCH2_URL, ok({ hitCount: 1, oppHits: [hit] }));
+      await expect(service.resolveNumber('SPARSE-1', ctxFor())).resolves.toEqual({
+        kind: 'unique',
+        id: 42,
+      });
+      expect(http.calls).toHaveLength(1);
+    },
+  );
+
   it('resolves a unique number, sent quoted across all four statuses', async () => {
     route(SEARCH2_URL, ok(searchData([HRSA_HIT])));
     await expect(service.resolveNumber('HRSA-27-005', ctxFor())).resolves.toEqual({
@@ -396,7 +477,7 @@ describe('resolveNumber', () => {
     );
   });
 
-  it('ignores hits without a numeric id', async () => {
+  it('rejects corrupt IDs instead of silently losing number matches', async () => {
     route(
       SEARCH2_URL,
       ok(
@@ -406,15 +487,56 @@ describe('resolveNumber', () => {
         ]),
       ),
     );
-    await expect(service.resolveNumber('HRSA-27-005', ctxFor())).resolves.toEqual({
-      kind: 'not_found',
-    });
+    const error = await rejection(() => service.resolveNumber('HRSA-27-005', ctxFor()));
+    expect(error.data).toMatchObject({ reason: 'upstream_unavailable', retryable: false });
+    expect(http.calls).toHaveLength(1);
   });
 });
 
 describe('scanClosingWindow', () => {
   const today = todayET();
   const cutoff = addDays(today, 7);
+
+  it('bounds all sequential scan pages by one operation deadline', async () => {
+    vi.useFakeTimers();
+    route(
+      SEARCH2_URL,
+      (request) =>
+        new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(
+            () =>
+              resolve(
+                ok(
+                  searchData(
+                    Array.from({ length: 500 }, (_, i) => postedHit(i + 1, 1)),
+                    2500,
+                  ),
+                ),
+              ),
+            14_000,
+          );
+          request.signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              reject(request.signal.reason);
+            },
+            { once: true },
+          );
+        }),
+    );
+    try {
+      const result = service.scanClosingWindow({}, cutoff, ctxFor()).then(
+        () => 'completed',
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(await result).toMatchObject({ data: { reason: 'upstream_unavailable' } });
+      expect(http.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   /** Serves 500-row pages from `rows`, keyed by the request's startRecordNum. */
   const pagedRoute = (rows: ReturnType<typeof postedHit>[], hitCount = rows.length) =>
@@ -537,6 +659,14 @@ describe('scanClosingWindow', () => {
     expect(scan.nextCloseAfterWindow).toBeUndefined();
   });
 
+  it.each([1999, 2000])('recognizes provider exhaustion at %i scanned rows', async (total) => {
+    pagedRoute(Array.from({ length: total }, (_, i) => postedHit(i + 1, 2)));
+    const scan = await service.scanClosingWindow({}, cutoff, ctxFor());
+    expect(scan.windowHits).toHaveLength(total);
+    expect(scan.ceilingHit).toBe(false);
+    expect(http.calls).toHaveLength(4);
+  });
+
   it('checks cancellation before paging', async () => {
     const controller = new AbortController();
     controller.abort(new Error('caller went away'));
@@ -601,8 +731,17 @@ describe('getReference', () => {
     vi.spyOn(Date, 'now').mockReturnValue(realNow + 25 * 60 * 60 * 1000);
 
     const second = await service.getReference(ctxFor());
-    expect(second).toBe(first);
-    expect(http.calls.length).toBeGreaterThan(0);
+    expect(second.fetchedAt).toBe(first.fetchedAt);
+    expect(second).toMatchObject({
+      cache: {
+        status: 'stale',
+        reason: 'upstream_route_unavailable',
+        retry_after: expect.any(String),
+      },
+    });
+    const calls = http.calls.length;
+    expect(await service.getReference(ctxFor())).toEqual(second);
+    expect(http.calls).toHaveLength(calls);
   });
 
   it('throws when the first build fails, then builds on the next call', async () => {
@@ -616,12 +755,34 @@ describe('getReference', () => {
     expect(snapshot.agencies.size).toBeGreaterThan(0);
   });
 
-  it('is not bound to the first caller’s cancellation', async () => {
+  it('rejects an already cancelled waiter without contacting upstream', async () => {
     const controller = new AbortController();
     controller.abort(new Error('caller went away'));
     http.route(referenceRoute());
-    const snapshot = await service.getReference(ctxFor({ signal: controller.signal }));
-    expect(snapshot.topLevelAgencies).toHaveLength(5);
+    await expect(service.getReference(ctxFor({ signal: controller.signal }))).rejects.toThrow(
+      'caller went away',
+    );
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it('cancels one waiter while another receives the shared build', async () => {
+    const controller = new AbortController();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    route(SEARCH2_URL, async () => {
+      await gate;
+      return ok(searchData([], 0, FACETS_ALL));
+    });
+    const cancelled = service.getReference(ctxFor({ signal: controller.signal }));
+    const rejected = expect(cancelled).rejects.toThrow('caller left');
+    const other = service.getReference(ctxFor());
+    controller.abort(new Error('caller left'));
+    await rejected;
+    release();
+    expect((await other).agencies.size).toBeGreaterThan(0);
+    expect(http.calls).toHaveLength(2);
   });
 
   it('uses the all-status facets for vocabulary and totals', async () => {

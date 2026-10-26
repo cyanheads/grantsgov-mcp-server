@@ -9,6 +9,29 @@ import { describe, expect, it } from 'vitest';
 import { htmlToText } from '@/services/grants-gov/html-to-text.js';
 
 describe('htmlToText — HTML input', () => {
+  it('keeps source-spaced inline children and surrounding prose', () => {
+    expect(htmlToText('Before <b>A </b><i> B</i> after')).toBe('Before A B after');
+  });
+
+  it('separates table rows and cells, including empty cells and inline children', () => {
+    expect(
+      htmlToText(
+        'Before<table><tr><th>Phase</th><th>Maximum award</th></tr><tr><td></td><td><b>$50,000</b></td><td></td></tr><tr><td>II</td><td>$150,000</td></tr></table>After',
+      ),
+    ).toBe('Before\n\nPhase | Maximum award\n | $50,000 |\nII | $150,000\n\nAfter');
+  });
+
+  it('keeps source whitespace, nested tables, and malformed table text bounded', () => {
+    expect(htmlToText('<table>\n<tr><td> A  <i>B</i> </td>\n<td> C</td></tr>\n</table>')).toBe(
+      ' A B\n | C',
+    );
+    expect(
+      htmlToText(
+        '<table><tr><td>Outer<table><tr><td>Inner</td><td>Value</td></tr></table>tail</td><td>Next</td></tr></table>',
+      ),
+    ).toBe('Outer\n\nInner | Value\n\ntail | Next');
+    expect(htmlToText('<table><tr><td>A<td>B<tr><td>C')).toBe('A | B\nC');
+  });
   it('keeps visible text between alternate and standard comment terminators', () => {
     expect(htmlToText('A<!-- note --!>B<!-- end -->C<!-- open')).toBe('ABC<!-- open');
   });
@@ -153,12 +176,16 @@ describe('htmlToText — malformed and hostile markup', () => {
     ['spaced anchors', '<a href="u"> ', true],
     ['entities', '&amp;amp;', false],
     ['overlapping names', '&NotEqualTilde', false],
+    ['table cells', '<table><tr><td>x<td>', false],
+    ['nested tables', '<table><tr><td>', false],
+    ['terminal line break', '§1 x', false],
+    ['line breaks throughout', '  \r\n', false],
   ] as const)('text CPU scaling: %s', { timeout: 30_000 }, (_name, token, closed) => {
     for (const breaks of [false, true]) {
       const make = (size: number) => {
         const part = breaks ? `${token}\n` : token;
         const count = Math.ceil(size / part.length);
-        return `${part.repeat(count)}${closed ? '</a>'.repeat(count) : ''}\n`;
+        return `${part.repeat(count)}${closed ? '</a>'.repeat(count) : ''}\n${token === '§1 x' ? 'y' : ''}`;
       };
       const measure = (input: string) => {
         const started = process.threadCpuUsage();
@@ -215,9 +242,10 @@ describe('htmlToText — malformed and hostile markup', () => {
     ['unclosed styles after a closed one', `<style></style>${'<style>'.repeat(12_500)}`],
     ['nested lists', `${'<ul>'.repeat(10_000)}${'<li>x'.repeat(10_000)}`],
   ])('converts 100 KB of %s in linear time', (_name, input) => {
-    const started = performance.now();
+    const started = process.threadCpuUsage();
     const text = htmlToText(input);
-    expect(performance.now() - started).toBeLessThan(250);
+    const cpu = process.threadCpuUsage(started);
+    expect(cpu.user + cpu.system).toBeLessThan(250_000);
     expect(text.length).toBeLessThanOrEqual(input.length * 2);
   });
 });

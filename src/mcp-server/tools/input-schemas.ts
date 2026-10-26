@@ -20,12 +20,23 @@ export const optionalText = <T extends z.ZodType>(schema: T) =>
 /** A whole string or list; drop blanks before bounding and validating the remaining members. */
 export const optionalList = <T extends z.ZodType>(item: T, max: number) =>
   z
-    .preprocess((value) => {
-      if (typeof value === 'string') value = [value];
-      if (!Array.isArray(value)) return value;
-      const kept = value.map(blankToUndefined).filter((x) => x !== undefined);
-      return kept.length === 0 ? undefined : kept;
-    }, z.union([z.string(), z.array(z.union([item, z.string().regex(/^\s*$/)]))]).optional())
+    .preprocess(
+      (value) => {
+        if (typeof value === 'string') value = [value];
+        if (!Array.isArray(value)) return value;
+        const kept = value.map(blankToUndefined).filter((x) => x !== undefined);
+        return kept.length === 0 ? undefined : kept;
+      },
+      /**
+       * Keep raw advertisement separate from the final member validation. JSON
+       * Schema probes catch callbacks without a context; no default is advertised.
+       */
+      z
+        .union([z.string(), z.array(z.union([item, z.string().regex(/^\s*$/)]))])
+        .optional()
+        .transform((value): unknown => value)
+        .catch((ctx: z.core.$ZodCatchCtx | undefined) => ctx?.value),
+    )
     .pipe(
       z.preprocess(
         (value) => value,

@@ -7,6 +7,8 @@
  * @module mcp-server/tools/render
  */
 
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+
 /**
  * Every line terminator a renderer or tokenizer may honor: CRLF, LF, CR, and
  * the Unicode mandatory breaks (VT, FF, NEL U+0085, LS U+2028, PS U+2029).
@@ -18,11 +20,13 @@ const escapeHtml = (text: string): string =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 /** An upstream string placed inside a line: every line break flattened to one space. */
-export const inline = (text: string): string => escapeHtml(text).replace(LINE_BREAK, ' ');
+export const inline = (text: string): string => escapeMarkdownInline(text.replace(LINE_BREAK, ' '));
 
 /** Renders an agency URL with a literal label and a portable Markdown destination. */
 export const urlLink = (url: string): string => {
-  const label = inline(url).replace(/[\\[\]`*_~]/g, '\\$&');
+  const label = escapeHtml(url)
+    .replace(LINE_BREAK, ' ')
+    .replace(/[\\[\]`*_~]/g, '\\$&');
   const destination = escapeHtml(url.replaceAll('\\', '\\\\'));
   return `[${label}](<${destination}>)`;
 };
@@ -45,20 +49,14 @@ export const codeSpan = (text: string): string => {
 export const tableCodeSpan = (text: string): string => codeSpan(text).replaceAll('|', '\\|');
 
 /**
- * An upstream string placed in a markdown table cell: flattened, with `|`
- * escaped. A backslash run before a pipe is doubled first, so a source `\|`
- * cannot turn the added escape into an escaped backslash and split the row.
+ * An upstream string placed in a markdown table cell, flattened and encoded
+ * once so literal pipes and backslashes cannot split the row.
  */
-export const tableCell = (text: string): string =>
-  inline(text).replaceAll('|', (_pipe, offset: number, source: string) => {
-    let start = offset;
-    while (start > 0 && source[start - 1] === '\\') start--;
-    return `${'\\'.repeat(offset - start + 1)}|`;
-  });
+export const tableCell = inline;
 
 /** A multi-line upstream field: every line prefixed with `> ` (blank lines as `>`). */
 export const blockquote = (text: string): string =>
   text
     .split(LINE_BREAK)
-    .map((line) => (line.trim() === '' ? '>' : `> ${escapeHtml(line)}`))
+    .map((line) => (line.trim() === '' ? '>' : `> ${escapeMarkdownInline(line)}`))
     .join('\n');

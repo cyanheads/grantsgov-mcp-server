@@ -419,6 +419,17 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
   }),
 
   output: z.object({
+    reference_cache: z
+      .object({
+        status: z.literal('stale').describe('The validation vocabulary is expired.'),
+        reason: z
+          .enum(['upstream_unavailable', 'upstream_route_unavailable', 'rate_limited'])
+          .describe('Sanitized refresh failure reason.'),
+        retry_after: z.string().describe('ISO timestamp when a refresh can be attempted again.'),
+        snapshot_date: z.string().describe('ISO timestamp of the vocabulary used for validation.'),
+      })
+      .optional()
+      .describe('Degraded reference-cache provenance when a filter uses stale vocabulary.'),
     opportunities: z.array(OpportunityRow).describe('Matching opportunities, deadline first.'),
     facets: z
       .object({
@@ -443,20 +454,41 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
     totalCount: z
       .number()
       .describe(
-        'Total matching opportunities (the closing-window count in closing_within_days mode).',
+        'Matching opportunities counted. In closing_within_days mode, total_count_kind says whether this is exact or a lower bound.',
       ),
-    truncated: z.boolean().describe('True when more rows exist past this page.'),
+    total_count_kind: z
+      .enum(['exact', 'lower_bound'])
+      .optional()
+      .describe(
+        'Closing-window count precision: exact after exhaustion or an observed boundary; lower_bound when unscanned rows may still qualify. Omitted in other modes.',
+      ),
+    truncated: z
+      .boolean()
+      .describe(
+        'True when more scanned matches remain after this page or a closing-window scan is incomplete, including on an empty page.',
+      ),
     shown: z.number().describe('Rows returned on this page.'),
     cap: z.number().describe('The limit applied.'),
     next_offset: z
       .number()
       .optional()
-      .describe('Offset for the next page; absent on the last page.'),
+      .describe(
+        'Offset for the next reachable page of scanned matches; absent when none remain, even if the closing-window scan is incomplete.',
+      ),
     effective_keyword: z.string().optional().describe('The keyword as compiled and sent upstream.'),
     applied_filters: AppliedFilters,
     notice: z.string().optional().describe('Zero-hit or window guidance naming the next call.'),
   },
-  enrichmentTrailer: { applied_filters: { render: renderAppliedFilters } },
+  enrichmentTrailer: {
+    totalCount: { render: (count) => `**Matching opportunities counted:** ${count}` },
+    total_count_kind: {
+      render: (kind) =>
+        kind === 'lower_bound'
+          ? '**Count precision:** lower bound; unscanned opportunities may also qualify.'
+          : '**Count precision:** exact.',
+    },
+    applied_filters: { render: renderAppliedFilters },
+  },
 
   errors: [
     {
@@ -497,7 +529,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
     {
       reason: 'upstream_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Grants.gov did not respond, or returned a 5xx, a non-JSON body, a non-zero errorcode, or a backend-unavailable message, after retries.',
+      when: 'Grants.gov returned a malformed search page, or did not respond or returned a 5xx, a non-JSON body, a non-zero errorcode, or a backend-unavailable message after retries.',
       recovery:
         'Grants.gov is not responding; wait a minute and call grantsgov_search_opportunities again.',
       retryable: true,
@@ -742,7 +774,8 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       hits = page(scan.windowHits);
       facets = scan.facets;
       ceilingHit = scan.ceilingHit;
-      if (total === 0 && scan.postedTotal > 0) {
+      ctx.enrich({ total_count_kind: ceilingHit ? 'lower_bound' : 'exact' });
+      if (total === 0 && scan.postedTotal > 0 && !ceilingHit) {
         primaryNotice = emptyWindowNotice(scan, closingDays, today);
       }
     } else if (oppNum !== undefined) {
@@ -774,7 +807,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       fragments.push(`Requested limit ${input.limit} was capped at ${limit} rows per page.`);
     if (primaryNotice !== undefined) {
       fragments.push(primaryNotice);
-    } else if (total === 0) {
+    } else if (total === 0 && !ceilingHit) {
       fragments.push('No opportunities matched these filters.');
       const closed = statusCount(facets, 'closed');
       const archived = statusCount(facets, 'archived');
@@ -821,14 +854,14 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         );
       }
       fragments.push('Rerun with fewer filters to see facet counts for refining.');
-    } else if (opportunities.length === 0 && input.offset >= total) {
+    } else if (opportunities.length === 0 && input.offset >= total && !ceilingHit) {
       fragments.push(
         `Offset ${input.offset} is past the end of ${total} results. Call again with offset 0, or a multiple of limit below ${total}.`,
       );
     }
     if (ceilingHit) {
       fragments.push(
-        `The closing window holds more than ${SCAN_CEILING.toLocaleString('en-US')} opportunities; results cover the first ${SCAN_CEILING.toLocaleString('en-US')} by close date. Add filters to narrow.`,
+        `At least ${total} matching opportunities were found before the ${SCAN_CEILING.toLocaleString('en-US')}-row scan ceiling; unscanned posted rows may also qualify. Add filters to narrow, or call grantsgov_search_opportunities without closing_within_days, with statuses posted and sort close_date_asc, preserving the other filters.`,
       );
     }
     if (closingDays !== undefined && input.include_facets) {
@@ -843,8 +876,8 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
     const notice = fragments.join(' ');
 
     ctx.enrich({ totalCount: total, shown: opportunities.length });
-    if (more) {
-      ctx.enrich({ next_offset: nextOffset });
+    if (more) ctx.enrich({ next_offset: nextOffset });
+    if (more || ceilingHit) {
       ctx.enrich.truncated({ shown: opportunities.length, cap: limit, guidance: notice });
     } else if (notice) {
       ctx.enrich.notice(notice);
@@ -857,9 +890,13 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       shown: opportunities.length,
     });
 
-    if (!input.include_facets) return { opportunities };
+    const provenance = snapshot?.cache
+      ? { reference_cache: { ...snapshot.cache, snapshot_date: snapshot.fetchedAt } }
+      : {};
+    if (!input.include_facets) return { opportunities, ...provenance };
     return {
       opportunities,
+      ...provenance,
       facets: {
         statuses: toFacets(facets.oppStatusOptions),
         eligibilities: toFacets(facets.eligibilities),
@@ -876,6 +913,11 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
 
   format: (result) => {
     const lines: string[] = ['## Grants.gov opportunities', ''];
+    if (result.reference_cache)
+      lines.push(
+        `Reference cache: ${result.reference_cache.status}; vocabulary fetched ${result.reference_cache.snapshot_date}; refresh failed (${result.reference_cache.reason}); retry after ${result.reference_cache.retry_after}.`,
+        '',
+      );
     if (result.opportunities.length === 0) {
       lines.push('No opportunities on this page.');
     } else {

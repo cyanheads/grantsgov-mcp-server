@@ -7,7 +7,8 @@
  * @module tests/mcp-server/tools/input-schemas.test
  */
 
-import { z } from '@cyanheads/mcp-ts-core';
+import { tool, z } from '@cyanheads/mcp-ts-core';
+import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { grantsgovGetOpportunity } from '@/mcp-server/tools/definitions/grantsgov-get-opportunity.tool.js';
 import { grantsgovListReference } from '@/mcp-server/tools/definitions/grantsgov-list-reference.tool.js';
@@ -95,6 +96,90 @@ describe('optionalList', () => {
     expect(schema.parse({ codes: ' 12 ' })).toEqual({ codes: ['12'] });
     expect(schema.parse({ codes: ' ' })).toEqual({ codes: undefined });
     expect(() => schema.parse({ codes: '12,07' })).toThrow();
+  });
+
+  it('reports the retained member constraint without the blank-padding branch', () => {
+    const parsed = schema.safeParse({ codes: ['7'] });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) throw new Error('Expected an invalid retained member');
+    expect(parsed.error.issues).toMatchObject([{ path: ['codes', 0], pattern: '/^\\d{2}$/' }]);
+    expect(JSON.stringify(parsed.error.issues)).not.toContain('^\\\\s*$');
+  });
+});
+
+describe('invalid list member recovery', () => {
+  it.each([
+    [grantsgovGetOpportunity, { opportunity_ids: ['not-an-id'] }, 'positive whole number'],
+    [grantsgovGetOpportunity, { opportunity_ids: 'not-an-id' }, 'positive whole number'],
+    [grantsgovSearchOpportunities, { agencies: ['HHS|NSF'] }, 'agency code'],
+  ])('reports domain constraints through %s', async (definition, input, constraint) => {
+    const result = await runToolContract(definition, input);
+    expect(result.isError).toBe(true);
+    const { error } = z
+      .object({
+        error: z.object({
+          code: z.number(),
+          message: z.string(),
+          data: z.object({ reason: z.string(), recovery: z.object({ hint: z.string() }) }),
+        }),
+      })
+      .parse(result.structuredContent);
+    expect(error.code).toBe(-32602);
+    expect(error.data.reason).toBe('invalid_arguments');
+    expect(error.message).toContain(constraint);
+    expect(error.data.recovery.hint).toContain(constraint);
+    const rendered = result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(rendered).toContain(constraint);
+    for (const message of [error.message, error.data.recovery.hint, rendered]) {
+      expect(message).not.toContain('must match pattern /^\\s');
+    }
+  });
+});
+
+describe('list inputs through production argument repair', () => {
+  const detailEcho = tool('detail_input_echo', {
+    description: 'Echo parsed detail inputs without calling an upstream service.',
+    input: grantsgovGetOpportunity.input,
+    output: z.object({ received: z.unknown().describe('Parsed detail arguments.') }),
+    handler: async (received) => ({ received }),
+  });
+  const searchEcho = tool('search_input_echo', {
+    description: 'Echo parsed search inputs without calling an upstream service.',
+    input: grantsgovSearchOpportunities.input,
+    output: z.object({ received: z.unknown().describe('Parsed search arguments.') }),
+    handler: async (received) => ({ received }),
+  });
+
+  it.each([
+    [{ opportunity_ids: 344001 }, { opportunity_ids: [344001] }],
+    [{ opportunity_ids: ' 344001 ' }, { opportunity_ids: [344001] }],
+    [{ opportunity_numbers: 1 }, { opportunity_numbers: ['1'] }],
+    [
+      { opportunity_numbers: ' "PAS-TUNIS- APS FY2026" ' },
+      { opportunity_numbers: ['PAS-TUNIS- APS FY2026'] },
+    ],
+    [{ opportunity_ids: [344001, ...Array(60).fill(' ')] }, { opportunity_ids: [344001] }],
+    [{ opportunity_ids: ['', ' '] }, {}],
+  ])('preserves accepted detail arguments %j', async (input, received) => {
+    const result = await runToolContract(detailEcho, input);
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({ received });
+  });
+
+  it.each([
+    [{ eligibilities: 1 }, { eligibilities: ['01'] }],
+    [{ agencies: ' hhs ' }, { agencies: ['HHS'] }],
+    [{ statuses: ['posted', ...Array(60).fill(' ')] }, { statuses: ['posted'] }],
+    [{ funding_categories: ' hl ' }, { funding_categories: ['HL'] }],
+    [{ funding_instruments: ' g ' }, { funding_instruments: ['G'] }],
+    [{ agencies: ['', ' '] }, { agencies: undefined }],
+  ])('preserves accepted search arguments %j', async (input, received) => {
+    const result = await runToolContract(searchEcho, input);
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ received });
   });
 });
 
@@ -353,7 +438,7 @@ describe('advertised input schemas admit every raw form the descriptions promise
       }),
     ).toEqual({ opportunity_ids: [363423, 363423], opportunity_numbers: ['HRSA-27-005'] });
     expect(grantsgovListReference.input.parse({ topic: ' Agencies ', parent_code: 'hhs' })).toEqual(
-      { topic: 'agencies', parent_code: 'HHS' },
+      { topic: 'agencies', parent_code: 'HHS', limit: 50, offset: 0 },
     );
   });
 });

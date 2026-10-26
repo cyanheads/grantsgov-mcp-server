@@ -27,28 +27,28 @@ export interface Search2Body {
 
 /** One `search2` result row. Dates are `MM/DD/YYYY` or `""`. */
 export interface RawHit {
-  agency?: string | null;
-  agencyCode?: string | null;
-  cfdaList?: string[] | null;
-  closeDate?: string | null;
-  docType?: string | null;
-  id?: string | null;
-  number?: string | null;
-  openDate?: string | null;
-  oppStatus?: string | null;
-  title?: string | null;
+  agency?: string | null | undefined;
+  agencyCode?: string | null | undefined;
+  cfdaList?: string[] | null | undefined;
+  closeDate?: string | null | undefined;
+  docType?: string | null | undefined;
+  id?: string | null | undefined;
+  number?: string | null | undefined;
+  openDate?: string | null | undefined;
+  oppStatus?: string | null | undefined;
+  title?: string | null | undefined;
 }
 
 /** One facet option: a filter code, its label, and a match count. */
 export interface RawFacetOption {
-  count?: number | null;
-  label?: string | null;
-  value?: string | null;
+  count?: number | null | undefined;
+  label?: string | null | undefined;
+  value?: string | null | undefined;
 }
 
 /** A top-level agency facet option. `subAgencyOptions` lists every descendant, flat. */
 export interface RawAgencyOption extends RawFacetOption {
-  subAgencyOptions?: RawFacetOption[] | null;
+  subAgencyOptions?: RawFacetOption[] | null | undefined;
 }
 
 /** The facet block every `search2` response carries. */
@@ -58,12 +58,6 @@ export interface RawFacets {
   fundingCategories?: RawFacetOption[] | null | undefined;
   fundingInstruments?: RawFacetOption[] | null | undefined;
   oppStatusOptions?: RawFacetOption[] | null | undefined;
-}
-
-/** `search2` `data`. `searchParams` is absent on a parameter-rejection skeleton, so it is never read. */
-export interface RawSearchData extends RawFacets {
-  hitCount?: number | null;
-  oppHits?: RawHit[] | null;
 }
 
 /** A `{ id, description }` code pair on a detail record. */
@@ -178,7 +172,7 @@ export interface SearchResult {
 
 /** `scanClosingWindow()` result. */
 export interface ClosingWindowScan {
-  /** True when the 2,000-row ceiling was reached while still inside the window. */
+  /** True when the scan ceiling leaves unscanned posted rows without an observed window boundary. */
   ceilingHit: boolean;
   /** Facets from the first page: the whole posted set matching the other filters, not the window. */
   facets: RawFacets;
@@ -228,6 +222,12 @@ export interface AgencyNode extends ReferenceCode {
 export interface ReferenceSnapshot {
   /** Every agency code (top-level and sub-agency), keyed by code. */
   agencies: ReadonlyMap<string, AgencyNode>;
+  /** Present only when a failed refresh is serving the previous vocabulary. */
+  cache?: {
+    status: 'stale';
+    reason: 'upstream_unavailable' | 'upstream_route_unavailable' | 'rate_limited';
+    retry_after: string;
+  };
   eligibilities: ReferenceCode[];
   /** ISO timestamp of the fetch. */
   fetchedAt: string;

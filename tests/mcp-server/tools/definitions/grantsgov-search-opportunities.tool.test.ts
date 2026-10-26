@@ -17,7 +17,8 @@ import {
   getEnrichment,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { grantsgovGetOpportunity } from '@/mcp-server/tools/definitions/grantsgov-get-opportunity.tool.js';
 import { grantsgovSearchOpportunities } from '@/mcp-server/tools/definitions/grantsgov-search-opportunities.tool.js';
 import {
   getGrantsGovService,
@@ -28,8 +29,10 @@ import type { RawFacets, RawHit, Search2Body } from '@/services/grants-gov/types
 import {
   bodyOf,
   closingIn,
+  DETAIL_HRSA,
   FACETS_ALL,
   FACETS_OPEN,
+  FETCH_URL,
   HRSA_HIT,
   json,
   OPP_NUM_1_HITS,
@@ -46,8 +49,45 @@ import {
   NSF_ZERO_HIT_FACETS,
 } from '../../../fixtures/grants-gov-records.js';
 import { contractFailure, drained } from '../../../fixtures/harness.js';
+import { renderedTexts } from '../../../fixtures/markdown.js';
 
 const tool = grantsgovSearchOpportunities;
+
+it('mirrors stale reference validation provenance without replacing zero-hit guidance', async () => {
+  http.route({ method: 'POST', match: SEARCH2_URL, respond: () => referenceResponse({ rows: 0 }) });
+  await getGrantsGovService().getReference(createMockContext());
+  const now = Date.now();
+  vi.spyOn(Date, 'now').mockReturnValue(now + 25 * 60 * 60 * 1000);
+  http.reset();
+  http.route({
+    method: 'POST',
+    match: SEARCH2_URL,
+    respond: async (request) =>
+      (await bodyOf(request)).rows === 0 ? json({}, 403) : ok(searchData([], 0)),
+  });
+  try {
+    const result = await runToolContract(tool, { agencies: ['NSF'], include_facets: false });
+    expect(result.structuredContent).toMatchObject({
+      reference_cache: {
+        status: 'stale',
+        reason: 'upstream_route_unavailable',
+        snapshot_date: expect.any(String),
+        retry_after: expect.any(String),
+      },
+      notice: expect.any(String),
+    });
+    const text = result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain('upstream_route_unavailable');
+    expect(text).toContain('stale');
+    const plain = await runToolContract(tool, { include_facets: false });
+    expect(plain.structuredContent).not.toHaveProperty('reference_cache');
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
 
 describe('entity text contract', () => {
   it('decodes row and nested facet labels across both response surfaces', async () => {
@@ -90,8 +130,9 @@ describe('entity text contract', () => {
       .filter((block) => block.type === 'text')
       .map((block) => block.text)
       .join('\n');
-    for (const value of ['Health® &lt;reference&gt;', 'Agency Á', 'Top é', 'Sub §', 'Category ®'])
-      expect(rendered).toContain(value);
+    const literalText = renderedTexts(rendered).join('\n');
+    for (const value of ['Health® <reference>', 'Agency Á', 'Top é', 'Sub §', 'Category ®'])
+      expect(literalText).toContain(value);
     expect(result.opportunities[0]?.opportunity_number).toBe('ID&42');
     expect(rendered).toContain('`ID&42`');
     expect(rendered).toContain('`TOP&amp;`');
@@ -869,6 +910,7 @@ describe('closing-window mode', () => {
     expect(result.opportunities.map((row) => row.days_until_close)).toEqual([0, 3, 7]);
     expect(enrichment).toEqual({
       totalCount: 3,
+      total_count_kind: 'exact',
       truncated: false,
       shown: 3,
       cap: 25,
@@ -963,7 +1005,7 @@ describe('closing-window mode', () => {
       truncated: true,
       next_offset: 25,
       notice:
-        'The closing window holds more than 2,000 opportunities; results cover the first 2,000 by close date. Add filters to narrow. More results: call again with offset 25.',
+        'At least 2000 matching opportunities were found before the 2,000-row scan ceiling; unscanned posted rows may also qualify. Add filters to narrow, or call grantsgov_search_opportunities without closing_within_days, with statuses posted and sort close_date_asc, preserving the other filters. More results: call again with offset 25.',
     });
   });
 
@@ -1268,6 +1310,175 @@ describe('input schema', () => {
 });
 
 describe('production envelope (runToolContract)', () => {
+  it('marks combined exact-number closing searches exact on both surfaces', async () => {
+    page([{ ...HRSA_HIT, closeDate: closingIn(2) }]);
+    const response = await runToolContract(tool, {
+      opportunity_number: 'HRSA-27-005',
+      closing_within_days: 30,
+      include_facets: false,
+    });
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      total_count_kind: 'exact',
+      totalCount: 1,
+      truncated: false,
+    });
+    const text = response.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain('**Count precision:** exact.');
+  });
+  it('keeps sparse unique number resolution usable through the full retrieval envelope', async () => {
+    serve(() => ok({ hitCount: 1, oppHits: [{ id: '363423', number: 'SPARSE-1' }] }));
+    http.route({ method: 'POST', match: FETCH_URL, respond: () => ok(DETAIL_HRSA) });
+    const response = await runToolContract(grantsgovGetOpportunity, {
+      opportunity_numbers: ['SPARSE-1'],
+    });
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      opportunities: [{ opportunity_id: 363423 }],
+      unresolved: [],
+    });
+    const text = response.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain('363423');
+    expect(text).toContain('HRSA-27-005');
+  });
+  it.each([1999, 2000, 2400])(
+    'distinguishes exhaustion from incomplete scans for %i provider rows',
+    async (total) => {
+      paged(Array.from({ length: total }, (_, index) => postedHit(index + 1, 2)));
+      for (const offset of [0, 1900, 2000]) {
+        const response = await runToolContract(tool, {
+          closing_within_days: 30,
+          offset,
+          limit: 100,
+          include_facets: false,
+        });
+        expect(response.isError).not.toBe(true);
+        const result = response.structuredContent;
+        const lowerBound = total > 2000;
+        expect(result).toMatchObject({
+          totalCount: Math.min(total, 2000),
+          total_count_kind: lowerBound ? 'lower_bound' : 'exact',
+          truncated: lowerBound || offset + 100 < total,
+        });
+        if (offset === 0) expect(result).toHaveProperty('next_offset', 100);
+        else expect(result).not.toHaveProperty('next_offset');
+        const text = response.content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n');
+        if (lowerBound) {
+          expect(text).toContain('At least 2000 matching opportunities');
+          expect(text).not.toContain('past the end');
+          expect(text).not.toContain('holds more than');
+          expect(text).toContain('without closing_within_days');
+        } else expect(text).not.toContain('scan ceiling');
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'counts only qualifying scanned matches when past dates are skipped (boundary %s)',
+    async (boundary) => {
+      const rows = Array.from({ length: 2400 }, (_, index) =>
+        postedHit(index + 1, index < 20 ? -1 : boundary && index >= 1999 ? 31 : 2),
+      );
+      paged(rows);
+      const response = await runToolContract(tool, {
+        closing_within_days: 30,
+        offset: 1979,
+        limit: 1000,
+        include_facets: true,
+      });
+      expect(response.isError).not.toBe(true);
+      expect(response.structuredContent).toMatchObject({
+        totalCount: boundary ? 1979 : 1980,
+        total_count_kind: boundary ? 'exact' : 'lower_bound',
+        shown: boundary ? 0 : 1,
+        cap: 100,
+        truncated: !boundary,
+      });
+      expect(response.structuredContent).not.toHaveProperty('next_offset');
+      const text = response.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      expect(text).toContain('capped at 100');
+      expect(text).toContain(FACET_FRAGMENT);
+      if (!boundary) expect(text).toContain('At least 1980 matching opportunities');
+    },
+  );
+
+  it('does not claim an empty incomplete scan proved that no rows qualify', async () => {
+    paged(Array.from({ length: 2400 }, (_, index) => postedHit(index + 1, -1)));
+    const response = await runToolContract(tool, {
+      closing_within_days: 30,
+      include_facets: false,
+    });
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      totalCount: 0,
+      total_count_kind: 'lower_bound',
+      shown: 0,
+      truncated: true,
+    });
+    const text = response.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).not.toContain('No opportunities matched');
+    expect(text).not.toContain('all 2400');
+    expect(text).toContain('At least 0 matching opportunities');
+  });
+  it.each([{}, { opportunity_number: 'HRSA-27-005' }, { closing_within_days: 30 }])(
+    'exposes malformed-page recovery on both surfaces in mode %j',
+    async (mode) => {
+      serve(() => ok({ hitCount: 1, oppHits: [{ ...HRSA_HIT, id: null }] }));
+      const result = await drained(() => runToolContract(tool, { ...mode, include_facets: false }));
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: {
+            reason: 'upstream_unavailable',
+            retryable: false,
+            recovery: {
+              hint: 'Grants.gov is not responding; wait a minute and call grantsgov_search_opportunities again.',
+            },
+          },
+        },
+      });
+      const text = result.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      expect(text).toContain('upstream_unavailable');
+      expect(text).toContain('wait a minute and call grantsgov_search_opportunities again');
+      expect(await pageBodies()).toHaveLength(1);
+    },
+  );
+
+  it('preserves sparse rows on both surfaces', async () => {
+    page([{ id: '42', oppStatus: 'posted', docType: 'synopsis' }]);
+    const result = await runToolContract(tool, { include_facets: false });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      opportunities: [
+        { opportunity_id: '42', close_date_kind: 'none_listed', assistance_listings: [] },
+      ],
+    });
+    const text = result.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+    expect(text).toContain('| 42 | Not listed |');
+    expect(text).toContain('none listed');
+  });
   const text = (result: Awaited<ReturnType<typeof runToolContract>>) =>
     result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
 

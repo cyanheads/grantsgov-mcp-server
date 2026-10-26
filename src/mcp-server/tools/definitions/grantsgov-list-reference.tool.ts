@@ -11,7 +11,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getGrantsGovService } from '@/services/grants-gov/grants-gov-service.js';
 import { resolveAgencyScope } from '@/services/grants-gov/reference.js';
 import type { ReferenceCode, ReferenceSnapshot } from '@/services/grants-gov/types.js';
-import { AGENCY_CODE_INPUT, optionalText, trimLower } from '../input-schemas.js';
+import { AGENCY_CODE_INPUT, numberFromDigits, optionalText, trimLower } from '../input-schemas.js';
 import { tableCell, tableCodeSpan } from '../render.js';
 
 const TOPICS = [
@@ -214,6 +214,16 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
+    limit: z
+      .preprocess(numberFromDigits, z.number().int().min(1).max(1000).default(50))
+      .describe(
+        'Entries per page; defaults to 50. Requests above the processing cap of 100 are clamped with a notice.',
+      ),
+    offset: z
+      .preprocess(numberFromDigits, z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0))
+      .describe(
+        'Zero-based offset into the complete filtered list; use continuation for the next page.',
+      ),
     topic: z
       .preprocess(trimLower, z.enum(TOPICS))
       .describe(
@@ -228,6 +238,18 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
   }),
 
   output: z.object({
+    continuation: z
+      .object({
+        topic: z.enum(TOPICS).describe('Topic to list again.'),
+        name_contains: z.string().optional().describe('The same name filter.'),
+        parent_code: z.string().optional().describe('The same agency scope.'),
+        limit: z.number().describe('Effective page size.'),
+        offset: z.number().describe('Offset of the next page.'),
+      })
+      .optional()
+      .describe(
+        'Complete arguments for the next grantsgov_list_reference call; absent when no entries remain.',
+      ),
     topic: z.enum(TOPICS).describe('The topic listed.'),
     entries: z
       .array(
@@ -272,10 +294,23 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
       .describe(
         'When the live vocabulary was fetched (ISO timestamp); absent for fully static topics.',
       ),
+    reference_cache: z
+      .object({
+        status: z.literal('stale').describe('The cached vocabulary is expired.'),
+        reason: z
+          .enum(['upstream_unavailable', 'upstream_route_unavailable', 'rate_limited'])
+          .describe('Sanitized refresh failure reason.'),
+        retry_after: z.string().describe('ISO timestamp when a refresh can be attempted again.'),
+      })
+      .optional()
+      .describe('Degraded reference-cache provenance; absent after a healthy refresh.'),
   }),
 
   enrichment: {
-    totalCount: z.number().describe('Entries returned.'),
+    totalCount: z.number().describe('Total entries matching the filters before paging.'),
+    shown: z.number().describe('Entries returned on this page.'),
+    cap: z.number().describe('Effective page size, at most 100.'),
+    truncated: z.boolean().describe('True when matching entries remain after this page.'),
     notice: z
       .string()
       .optional()
@@ -330,7 +365,8 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
 
   async handler(input, ctx) {
     ctx.enrich.total(0);
-    const { topic, name_contains: nameContains, parent_code: parentCode } = input;
+    const { topic, name_contains: nameContains, parent_code: parentCode, offset } = input;
+    const limit = Math.min(input.limit, 100);
 
     if (parentCode !== undefined && topic !== 'agencies') {
       throw ctx.fail(
@@ -341,6 +377,7 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
 
     let entries: Entry[];
     let snapshotDate: string | undefined;
+    let referenceCache: ReferenceSnapshot['cache'];
     let leafParent = false;
 
     if (topic === 'sort_options') {
@@ -350,6 +387,7 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
     } else {
       const snapshot = await getGrantsGovService().getReference(ctx);
       snapshotDate = snapshot.fetchedAt;
+      referenceCache = snapshot.cache;
       if (topic !== 'agencies') {
         entries = vocabularyEntries(topic, snapshot);
       } else if (parentCode !== undefined) {
@@ -374,30 +412,71 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
     const tokens = nameContains === undefined ? undefined : nameTokens(nameContains);
     if (tokens !== undefined)
       entries = tokens.length === 0 ? [] : entries.filter((entry) => matchesName(entry, tokens));
+    if (topic === 'agencies')
+      entries.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
     ctx.enrich.total(entries.length);
+    const total = entries.length;
+    entries = entries.slice(offset, offset + limit);
+    const hasNext = offset + entries.length < total;
+    ctx.enrich({ shown: entries.length, cap: limit, truncated: hasNext });
+    const notices: string[] = [];
+    if (input.limit > limit)
+      notices.push(`Requested limit ${input.limit} was clamped to the processing cap of ${limit}.`);
+    if (offset >= total && total > 0)
+      notices.push(
+        `The offset ${offset} is past the ${total} matching entries. Use offset 0 to return to the first page.`,
+      );
 
     if (tokens !== undefined && tokens.length === 0) {
-      ctx.enrich.notice(
+      notices.push(
         `name_contains "${nameContains}" has no letters or digits, so it matches nothing. Pass a word from the name, or call grantsgov_list_reference with topic ${topic} and no name_contains to browse the full list.`,
       );
     } else if (leafParent) {
-      ctx.enrich.notice(
+      notices.push(
         `${parentCode} has no sub-agencies. Pass it directly as an agencies filter to grantsgov_search_opportunities.`,
       );
-    } else if (entries.length === 0 && nameContains !== undefined) {
-      ctx.enrich.notice(
+    } else if (total === 0 && nameContains !== undefined) {
+      notices.push(
         `No ${topic} entry matched "${nameContains}". Try a shorter name or a single distinctive word, or call grantsgov_list_reference with topic ${topic} and no name_contains to browse the full list.`,
       );
     }
+    if (notices.length) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('Listed reference entries', { topic, count: entries.length });
-    return { topic, entries, ...(snapshotDate !== undefined && { snapshot_date: snapshotDate }) };
+    return {
+      topic,
+      entries,
+      ...(snapshotDate !== undefined && { snapshot_date: snapshotDate }),
+      ...(referenceCache && { reference_cache: referenceCache }),
+      ...(hasNext && {
+        continuation: {
+          topic,
+          ...(nameContains !== undefined && { name_contains: nameContains }),
+          ...(parentCode !== undefined && { parent_code: parentCode }),
+          limit,
+          offset: offset + entries.length,
+        },
+      }),
+    };
   },
 
   format: (result) => {
     const { entries } = result;
     const lines = [`## Grants.gov reference: ${result.topic}`, ''];
     if (result.snapshot_date) lines.push(`Live vocabulary fetched ${result.snapshot_date}.`, '');
+    if (result.reference_cache)
+      lines.push(
+        `Reference cache: ${result.reference_cache.status}; refresh failed (${result.reference_cache.reason}); retry after ${result.reference_cache.retry_after}.`,
+        '',
+      );
+    if (result.continuation)
+      lines.push(
+        'Next grantsgov_list_reference arguments:',
+        '```json',
+        JSON.stringify(result.continuation),
+        '```',
+        '',
+      );
     if (entries.length === 0) {
       lines.push('No entries.');
       return [{ type: 'text', text: lines.join('\n') }];
