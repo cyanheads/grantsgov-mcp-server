@@ -18,7 +18,7 @@ Search US federal grant opportunities on Grants.gov and read full opportunity de
 
 ### Resources
 
-None. Every record is reachable through `grantsgov_get_opportunity`; see [Decisions Log](#decisions-log).
+`skill://grantsgov-guide/SKILL.md` serves the published grant-review guide through the MCP Skills extension and the `skill://{+path}` resource template. It covers eligibility, deadline, completeness, and application-requirements gates. Opportunity records remain reachable through `grantsgov_get_opportunity`.
 
 ### Prompts
 
@@ -90,12 +90,16 @@ const optionalList = <T extends z.ZodType>(item: T, max: number) =>
       const kept = v.map(blankToUndefined).filter((x) => x !== undefined);
       return kept.length === 0 ? undefined : kept;
     },
-    z.union([z.string(), z.array(z.union([item, z.string().regex(/^\s*$/)]))]).optional(),
+    z.union([z.string(), z.array(z.union([item, z.string().regex(/^\s*$/)]))])
+      .optional().transform((value): unknown => value)
+      .catch((ctx: z.core.$ZodCatchCtx | undefined) => ctx?.value),
   ).pipe(z.preprocess((value) => value,
     z.array(item).max(max, `Pass at most ${max} nonblank entries.`).optional()));
 ```
 
 **The advertised schema admits the raw form; normalization runs in the schema.** Every normalization a `.describe()` promises (trim, case, zero-padding, prefix stripping, surrounding quotes) happens in the schema, and the handler never sees the raw form. A pattern input is built as `z.string().regex(RAW).transform(normalize).pipe(NORMALIZED)` (`normalizedString` in `input-schemas.ts`): `tools/list` (input-side JSON Schema) emits only the first stage, so `RAW` is written to admit every spelling the description promises (both cases, surrounding whitespace, blank), with no regex flags, since only the source is advertised. `NORMALIZED` then validates what the handler receives. A `z.preprocess` in front of a pattern would advertise the post-normalization pattern instead, and a client that validates arguments before sending would reject `hhs`, `7`, or `"363423"`. `RAW` runs on the unbounded caller string (up to the 1 MiB HTTP body limit), so it must fail in linear time: `rawPattern(core)` emits `^\s*(?:(?:core)\s*)?$`, the core starts and ends with non-whitespace, and no two adjacent quantified runs can match the same character. The opportunity-number pattern is written out as `^(?:[^"]*|\s*"[^"]*"\s*)$` for the same reason. `NORMALIZED` carries the length caps (`agencies` codes ≤ 100 characters, opportunity numbers ≤ 100), which also bound what an error echoes back. Enum inputs (`statuses`, `funding_instruments`, `sort`, `topic`) keep their canonical `enum`: their descriptions promise no other spelling, and case is still normalized server-side.
+
+The raw union advertises accepted spellings; its failed parse passes the original value to the mandatory final member validator. Invalid nonblank entries therefore receive the domain error without advice to supply whitespace. The optional catch context accommodates JSON Schema export, which probes the callback without one.
 
 **Optional numbers** (`posted_within_days`, `closing_within_days`) accept `''` as unset through the same `blankToUndefined` preprocess, then `z.number().int()` with bounds. A digit string (`"30"`) is coerced to a number in the preprocess because the mapping is exact.
 
@@ -161,7 +165,7 @@ Probed on posted opportunities with `sortBy: closeDate|asc`: close dates are mon
 
 1. `cutoff = todayET + closing_within_days`.
 2. Page `search2` with the caller's other filters, `oppStatuses: 'posted'`, `sortBy: 'closeDate|asc'`, `rows: 500`, `startRecordNum: 0, 500, …`.
-3. Stop at the first row whose close date is blank or later than `cutoff`, when a page comes back short, or after 2,000 rows scanned (a hard ceiling; the whole posted universe is 940). Hitting the ceiling sets a notice. The first row past the window is kept as `nextCloseAfterWindow` for the empty-window notice.
+3. Stop at the first row whose close date is blank or later than `cutoff`, when a page comes back short, when the reported posted total is exhausted, or after 2,000 rows scanned. Reaching the ceiling with unscanned posted rows and no observed window boundary makes the count a lower bound; exact exhaustion at the ceiling remains complete. The first row past the window is kept as `nextCloseAfterWindow` for the empty-window notice.
 4. The window is `todayET ≤ close_date ≤ cutoff`. A posted row dated before today (a status flip the upstream has not run yet) is skipped, not counted. `window_total` = rows inside the window. The returned page is `window.slice(offset, offset + limit)`.
 
 One call covers the typical case (242 posted opportunities closed within 30 days at the idea-stage probe). Facet counts in this mode describe the whole posted set matching the other filters, not the window. The notice says so when facets are included.
@@ -205,11 +209,12 @@ output: z.object({
 
 ```ts
 enrichment: {
-  totalCount: z.number().describe('Total matching opportunities (the closing-window count in closing_within_days mode).'),
-  truncated: z.boolean().describe('True when more rows exist past this page.'),
+  totalCount: z.number().describe('Matching opportunities counted; closing-window precision is given by total_count_kind.'),
+  total_count_kind: z.enum(['exact', 'lower_bound']).optional().describe('Closing-window count precision; omitted in other modes.'),
+  truncated: z.boolean().describe('More scanned matches remain or the closing-window scan is incomplete, including an empty page.'),
   shown: z.number().describe('Rows returned on this page.'),
   cap: z.number().describe('The limit applied.'),
-  next_offset: z.number().optional().describe('Offset for the next page; absent on the last page.'),
+  next_offset: z.number().optional().describe('Next reachable page within scanned matches; absent when none remain.'),
   effective_keyword: z.string().optional().describe('The keyword as compiled and sent upstream.'),
   applied_filters: z.object({ statuses, statuses_defaulted, agencies_sent, eligibilities_sent, include_unrestricted, funding_categories, funding_instruments, assistance_listing, opportunity_number, posted_within_days, closing_within_days, closing_cutoff_date, sort }).describe('Filters as the server applied them, including defaults and expansions.'),
   notice: z.string().optional().describe('Zero-hit or window guidance naming the next call.'),
@@ -229,8 +234,8 @@ const more = rows.length > 0 && input.offset + rows.length < total;
 if (more) fragments.push(`More results: call again with offset ${input.offset + rows.length}.`);
 const notice = fragments.join(' ') || undefined; // zero-hit, window, scan-ceiling, facet-scope, more-results
 ctx.enrich({ totalCount: total, shown: rows.length });
-if (more) {
-  ctx.enrich({ next_offset: input.offset + rows.length });
+if (more) ctx.enrich({ next_offset: input.offset + rows.length });
+if (more || ceilingHit) {
   ctx.enrich.truncated({ shown: rows.length, cap: limit, guidance: notice });
 } else if (notice) {
   ctx.enrich.notice(notice);
@@ -244,11 +249,11 @@ A write from one branch only would fail the framework's `output.extend(enrichmen
 | State | Condition | Result |
 |:------|:----------|:-------|
 | Page of results | `0 < shown ≤ limit` | Rows + facets; `truncated`/`next_offset` when more remain. |
-| Last page | `offset + shown == totalCount` | `truncated: false`, no `next_offset`. |
-| Offset past end | `offset ≥ totalCount > 0` | Empty rows + notice: `Offset {offset} is past the end of {totalCount} results. Call again with offset 0, or a multiple of limit below {totalCount}.` |
-| Zero hits | `totalCount == 0` | Success, empty rows, composed notice (below). |
+| Last page | Complete count and `offset + shown == totalCount` | `truncated: false`, no `next_offset`. |
+| Offset past end | Complete count and `offset ≥ totalCount > 0` | Empty rows + notice: `Offset {offset} is past the end of {totalCount} results. Call again with offset 0, or a multiple of limit below {totalCount}.` |
+| Zero hits | Complete count and `totalCount == 0` | Success, empty rows, composed notice (below). |
 | Window empty, posted matches exist | closing mode, `window_total == 0`, posted hits > 0 (exact matches only in opportunity-number mode) | When `nextCloseAfterWindow` is a `fixed` date with `d ≤ 365`: `No posted opportunity matching these filters closes within {N} days; the next one closes {date} ({d} days). Raise closing_within_days to at least {d}.` When it is blank, a placeholder, or more than 365 days out: `No posted opportunity matching these filters has a fixed deadline within {N} days; all {postedTotal} posted matches close later or list no fixed date. Call grantsgov_search_opportunities without closing_within_days and with sort close_date_asc to see them.` When no row past the window was reached (every posted match is dated before today, awaiting the upstream status flip): `No posted opportunity matching these filters closes within {N} days; all {postedTotal} posted matches have close dates before today that Grants.gov has not yet marked closed.` plus the same pointer. `within {N} days` reads `today` for `N = 0`, days are pluralized, and a count of 1 reads `the 1 posted match` with singular verbs. |
-| Scan ceiling hit | 2,000 rows scanned without leaving the window | Rows as scanned + notice: `The closing window holds more than 2,000 opportunities; results cover the first 2,000 by close date. Add filters to narrow.` |
+| Incomplete scan | Ceiling reached with unscanned posted rows and no observed window boundary | Numeric `totalCount` is a lower bound, `total_count_kind: lower_bound`, and `truncated: true`, including empty pages. Continue only through remaining scanned matches; otherwise narrow filters or remove `closing_within_days` and use `statuses: posted`, `sort: close_date_asc`, preserving the other filters. No claim is made about how many unscanned rows qualify. |
 | Invalid input | see errors | Typed error. |
 
 **Zero-hit notice composition.** Fragments append in this order when their condition holds. The first and last fragments are always present:
@@ -425,6 +430,8 @@ This block has no required field. `notice` composes unresolved-input guidance an
 | `topic` | `z.preprocess(trimLower, z.enum(['agencies','eligibilities','funding_categories','funding_instruments','statuses','sort_options','keyword_syntax']))` | Required. Case and surrounding whitespace are normalized server-side; the advertised enum stays canonical. |
 | `name_contains` | `optionalText(z.string().max(100))` | Local filter. Strict token match over label and code: normalize (lowercase, NFKD, strip diacritics and punctuation), every token must appear. A value that normalizes to no tokens (`---`) matches nothing and returns its own notice. For `agencies` it searches all 712 codes (top-level and sub-agencies) and ignores the top-level-only default. Applies to every topic. |
 | `parent_code` | `optionalText(AGENCY_CODE_INPUT)` | `agencies` only: list every code under this one (`HHS` → its 58 sub-agencies; `DOD-DARPA` → its offices). Any other topic → `filter_not_applicable`. Unknown → `unknown_parent_code`. |
+| `limit` | Integer 1–1,000, default 50 | Processing cap 100; larger requests are clamped with a notice. |
+| `offset` | Nonnegative safe integer, default 0 | Offset into the complete filtered list; use the returned continuation for the next page. |
 
 #### Data source
 
@@ -437,7 +444,7 @@ Codes appear only if at least one opportunity carries them, which is what makes 
 
 Agency counts are subtree counts: what an `agencies` filter on the code returns. A top-level agency's facet count already covers its sub-agencies (`HHS` 940 open), but a sub-agency's facet count covers only records filed at exactly that code, so the snapshot adds its descendants' counts (each record carries one agency code). `HHS-CDC` has 0 open records filed at its own code and 93 under its centers; it reports 93 open and 3,920 in all statuses, the same counts `grantsgov_search_opportunities` returns for `agencies: ["HHS-CDC"]`.
 
-Static topics (`statuses`, `sort_options`, `keyword_syntax`) need no upstream call. `statuses` still reads the snapshot for counts.
+`sort_options` and `keyword_syntax` need no upstream call. `statuses` has static labels but reads the snapshot for counts.
 
 #### Output
 
@@ -463,12 +470,15 @@ Static entries: `statuses` (four, with descriptions and counts: forecasted = ann
 
 ```ts
 enrichment: {
-  totalCount: z.number().describe('Entries returned.'),
+  totalCount: z.number().describe('Total entries matching filters before paging.'),
+  shown: z.number().describe('Entries returned on this page.'),
+  cap: z.number().describe('Effective page size, at most 100.'),
+  truncated: z.boolean().describe('Matching entries remain after this page.'),
   notice: z.string().optional().describe('Guidance when name_contains matched nothing, or when parent_code has no sub-agencies.'),
 },
 ```
 
-`totalCount` is written first, before the static/live branch (`ctx.enrich.total(0)`), then overwritten with `ctx.enrich.total(entries.length)` after filtering. Entry lists are bounded (largest: `name_contains` over agencies ≤ 712; `parent_code: DOS` = 218 after folding the self-entry), and the tool has no cap input, so no truncation fields.
+Parent/name filters apply to the complete scope before pagination. Agency entries sort by code; other topics retain their declared order. `totalCount` reports the complete filtered count, `shown` the page length, and `cap` the effective limit. When matching entries remain, `truncated` is true and output `continuation` carries `topic`, the supplied filters, `limit`, and the next `offset`; the formatter prints those arguments as JSON. Past-end pages are empty with offset guidance, distinct from no matching entries. Live topics retain `snapshot_date` on every page; a stale snapshot also adds `reference_cache` with `status: stale`, a sanitized failure `reason`, and the `retry_after` ISO timestamp.
 
 Zero-match notice: `No {topic} entry matched "{name_contains}". Try a shorter name or a single distinctive word, or call grantsgov_list_reference with topic {topic} and no name_contains to browse the full list.` When `parent_code` names an agency with no sub-agencies, `{parent_code} has no sub-agencies. Pass it directly as an agencies filter to grantsgov_search_opportunities.` takes precedence, with or without `name_contains`.
 
@@ -494,12 +504,12 @@ Titles, descriptions, eligibility narratives, close-date explanations, category 
 |:------|:-----|
 | Entity normalization (both surfaces) | Human-readable titles, agency names, labels, filenames, contact fields, and narratives receive at most two decoding passes. HTML5 named references use exact case-sensitive lookup before the historical mixed-case aliases; numeric references retain valid Unicode code points. Unknown names, invalid numeric references, bare ampersands, identifiers, codes, and standalone URLs stay literal. |
 | Narrative markup (both surfaces) | After decoding, `synopsisDesc`, `forecastDesc`, eligibility/category/deadline explanations, contact descriptions, and related notes pass through one forward markup scan. Recognized HTML elements are removed, with `p`/`div` adding paragraph breaks, `br` a line break, lists adding bounded indentation and bullets or numbers, and anchors adding their destination when different from the text. Non-HTML angle text and comparisons are preserved; an unfinished recognized tag is discarded. Completed comments (standard or alternate terminators), scripts, and styles are removed in fixed forward passes. Unterminated hidden spans keep their existing text behavior. Source newlines remain, each line is right-trimmed, nonbreaking spaces collapse, and runs of three or more newlines become a blank line. No decode or strip loop runs to stability. `structuredContent` carries this normalized text without HTML escaping or line-break flattening. |
-| `format()` inline slots | Any upstream string placed inside a line (title, agency name, opportunity id, category code, facet or reference label, file name, package title, related-opportunity note, close-date explanation in a table cell, contact name) has every line break flattened to one space: CRLF, LF, CR, and the Unicode breaks VT, FF, NEL (U+0085), LS (U+2028), and PS (U+2029), since a renderer or tokenizer may honor any of them. Inside a markdown table cell, `\|` is also escaped as `\\|`, and a backslash run directly before a pipe is doubled first, so a source `\|` cannot turn the added escape into an escaped backslash and split the row. |
-| `format()` multi-line fields | `description`, `eligibility_narrative`, `funding_category_explanation`, `close_date_explanation` (when rendered as a block), `agency_contact.details`: split on the same line-break set, and each line is prefixed with `> ` (blank lines as `>`). All three rendering helpers escape `&`, `<`, and `>` from agency text before insertion into markdown; generated quote markers and URL delimiters remain separate. |
+| `format()` inline slots | Agency-authored prose has every line break flattened to one space: CRLF, LF, CR, VT, FF, NEL (U+0085), LS (U+2028), and PS (U+2029). The framework's `escapeMarkdownInline` encodes the flattened text once so punctuation renders literally, including pipes and backslashes inside table cells. |
+| `format()` multi-line fields | `description`, `eligibility_narrative`, `funding_category_explanation`, `close_date_explanation` (when rendered as a block), `agency_contact.details`: split on the same line-break set, encode each line once with `escapeMarkdownInline`, then prefix with `> ` (blank lines as `>`). Generated quote markers remain separate from agency-authored text. |
 | `format()` literal identifiers | `codeSpan()` retains literal characters inside a backtick fence longer than any embedded backtick run. Code spans do not decode HTML entities. `tableCodeSpan()` adds the single pipe escape consumed by GFM tables, preserving existing backslashes and table columns. Both helpers flatten source line breaks; ordinary identifier styling stays unchanged. |
 | URLs | Attachment `download_url` is built by the server from a numeric id. `additional_info_url` uses an explicit Markdown link with separately escaped label and destination, preserving the upstream URL in released Markdown renderers. Links extracted from `a href` are upstream strings rendered as text. The server never fetches these URLs. |
 
-The service keeps markup conversion in-house to preserve source newlines and bound each scan. The `entities` package supplies the complete HTML5 named-reference vocabulary; numeric validity and the fixed two-pass limit remain explicit in `normalize.ts`.
+HTML table cells are separated by ` | `, rows by line breaks, and tables by paragraph breaks; nested tables retain their own cell boundaries. The service keeps markup conversion in-house to preserve source newlines and bound each scan. The `entities` package supplies the complete HTML5 named-reference vocabulary; numeric validity and the fixed two-pass limit remain explicit in `normalize.ts`.
 
 ---
 
@@ -509,7 +519,7 @@ The service keeps markup conversion in-house to preserve source newlines and bou
 |:--------|:------|:--------|
 | `GrantsGovService` (`src/services/grants-gov/grants-gov-service.ts`) | `POST https://api.grants.gov/v1/api/search2`, `POST https://api.grants.gov/v1/api/fetchOpportunity` | all three tools |
 
-Supporting modules in `src/services/grants-gov/`: `types.ts` (raw upstream shapes, all fields optional/nullable), `keyword.ts` (`compileKeyword`), `normalize.ts` (dates, money, close-date kind, ET "today", entity decoding), `html-to-text.ts`, `reference.ts` (snapshot build and agency tree).
+Supporting modules in `src/services/grants-gov/`: `types.ts` (raw upstream shapes and service results), `keyword.ts` (`compileKeyword`), `normalize.ts` (dates, money, close-date kind, ET "today", entity decoding), `html-to-text.ts`, `reference.ts` (snapshot build and agency tree). Search pages validate consumed fields before normalization: nonnegative integer counts, usable IDs, lifecycle values for displayed search rows, and facet shapes. A missing hit array is accepted for facets-only, zero-hit, or past-end requests; an expected nonempty page without it is malformed. Number resolution validates only its consumed candidate fields, retaining sparse or unknown lifecycle metadata. Malformed pages fail as non-retryable `upstream_unavailable`.
 
 Methods:
 
@@ -534,8 +544,8 @@ Methods:
 | Retry boundary | `withRetry` wraps fetch + parse + body classification per upstream call: `maxRetries: 2`, `baseDelayMs: 500` (observed latency 0.25–1.2 s), `deadlineMs: 25_000`, threading `attempt.signal` and `remainingMs` into the fetch. |
 | Pacing | No published limit. One `createPacer({ name: 'grants-gov', maxConcurrent: 4 })` fronts every upstream call, so a 5-item get or a burst of agent calls never opens more than 4 concurrent requests from this process. `withRetry` sits outside the pacer, so each attempt re-queues. Disposed in `createApp({ teardown })`. |
 | Fan-out | `grantsgov_get_opportunity` resolves numbers, then fetches records with `Promise.all` through the pacer (≤ 5). One failure throws the whole call (see Outcome states). |
-| Reference cache | Module-level `{ snapshot, fetchedAt, inflight }`. Refresh when older than 24 h. A failed refresh with a previous snapshot serves the stale one, logs a warning, and blocks further refresh attempts for 60 s so every call during an outage does not re-run the retry ladder. The build is shared by concurrent callers, so a failure with no snapshot reaches each of them carrying only its reason, and each caller's tool contract fills its own recovery hint. Process-local, not tenant-scoped (public vocabulary). No `ctx.state`. |
-| Cancellation | `ctx.signal` threads into `withRetry`; the closing-window scan checks `ctx.signal.aborted` between pages. |
+| Reference cache | Process-local public vocabulary, 24 h TTL, one shared detached build. An operational refresh failure with an existing snapshot serves it with stale provenance and a 60 s retry backoff; both response surfaces disclose its original timestamp, sanitized reason, and retry time. Search carries the same provenance when it uses the snapshot. Healthy refresh clears degradation. Cold failures reach every waiter with its own tool recovery hint. No `ctx.state`. |
+| Cancellation | `ctx.signal` threads into `withRetry`. Each reference waiter cancels independently without cancelling the shared build or receiving stale success. Closing-window pages share a 25 s operation deadline; reference validation plus scanning stays below the default 60 s client timeout. |
 
 ### Response-size budget
 
@@ -549,8 +559,8 @@ Historical raw upstream sizes and output estimates (not corpus maxima or byte ce
 | Get, 1 typical record | 5–54 KB (history stripped) | 3–15 KB | description ≤ 12,000 chars; narrative ≤ 6,000 |
 | Get, NSF 21-595 sample | 733 KB → ~19.5 KB after history strip | ~18 KB | history dropped, count kept |
 | Get, 5 records | — | typical 15–60 KB (estimate) | batch ≤ 5; per-record pages; attachments ≤ 30, packages ≤ 10, related ≤ 10 |
-| Reference, agencies top level | 58 KB (full facets) | ~4 KB (46 entries) | top level by default |
-| Reference, `parent_code: DOS` | — | ~18 KB (218 entries) | bounded vocabulary |
+| Reference, agencies top level | 58 KB (full facets) | ~4 KB (46 entries) | top level by default; 50 entries per page, cap 100 |
+| Reference, `parent_code: DOS` | — | ~18 KB (218 entries, historical unpaged estimate) | 50 entries per page, cap 100; complete continuation |
 
 Captured detail replays measured serialized UTF-8 JSON bytes on both caller surfaces (first page → final page):
 
@@ -669,7 +679,7 @@ Find federal funding with grantsgov_search_opportunities, then read full records
 4. **`grantsgov_list_reference`**. It grounds field-testing for the rest.
 5. **`grantsgov_search_opportunities`**.
 6. **`grantsgov_get_opportunity`**.
-7. Create the `src/mcp-server/tools/definitions/index.ts` barrel (the scaffold registers inline in `src/index.ts` and has none) and pass it to `createApp({ tools })`. No resources, no prompts.
+7. Register `src/mcp-server/tools/definitions/index.ts` with `createApp({ tools, skills: 'skills' })`. The skill resource supplies grant-review guidance; there are no record resources or prompts.
 
 Each step is independently testable.
 
@@ -721,5 +731,5 @@ Each step is independently testable.
 | Every 5xx surfaces as `ServiceUnavailable` / `upstream_unavailable`, 504 included, and 429 is its own `rate_limited` contract reason. | The contract promises one code per reason; the framework helper's default maps 504 to `Timeout`, which would split one upstream outage across two codes. A 429 is a predictable failure the agent should wait out, not an untyped error. |
 | A `name_contains` value with no letters or digits matches nothing, with its own notice. | With no tokens, the every-token rule is vacuously true and would return the whole list. Treating it as unset would also widen silently; an explicit empty result tells the caller the value was unusable. |
 | Forward HTML → text conversion; `entities` for HTML5 named references. | Narrative layout needs source-newline preservation and bounded scans. A maintained named-reference decoder covers the HTML5 vocabulary without duplicating its table; fixed decoding passes keep double encoding predictable. |
-| No resources, no prompts, no DataCanvas. | Tools cover every record. This is discovery over categorical metadata (find, then drill in), not rows an agent would query with SQL. |
+| Publish one grant-review skill resource; no record resources, prompts, or DataCanvas. | Tools cover every record. The skill carries the judgment gates between discovery and recommendations: eligibility, deadlines, complete retrieval, and announcement review. It ships through plugins, npm, Docker, MCPB, and MCP so clients can retrieve that guidance. |
 | Deferred: `grantsgov_read_attachment` (NOFO PDF → outlined text). | Required forms and detailed eligibility often live only in the PDF, but PDF parsing and large-document handling are a separate build. v1 returns `download_url`s. |

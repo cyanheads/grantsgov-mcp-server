@@ -2,7 +2,7 @@
 
 **Server:** grantsgov-mcp-server (npm `@cyanheads/grantsgov-mcp-server`)
 **Version:** 0.1.3
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **Upstream:** Grants.gov legacy REST API (`https://api.grants.gov/v1/api`: `POST search2`, `POST fetchOpportunity`) — keyless, no env config
 
@@ -45,18 +45,18 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 |:-----|:---------------|:------|
 | `grantsgov_search_opportunities` | 1× `search2`; 1–4 pages of 500 for `closing_within_days`; 1–2 for `opportunity_number`; plus the cached reference snapshot when `agencies` / `eligibilities` / `funding_categories` is set | Three modes share one enrichment contract: plain upstream page, exact opportunity-number match paged locally, server-side closing-window scan |
 | `grantsgov_get_opportunity` | `search2` per selected opportunity number (all statuses), then `fetchOpportunity` per selected id, fanned out through the pacer | Accepts 50 nonblank entries per list / 50 unique combined; selects 5 identifiers before resolution, ids first; deferred arrays and executable continuation preserve section offsets. Six independent section pages; misses and ambiguity are `unresolved[]`, upstream failures throw |
-| `grantsgov_list_reference` | The reference snapshot (2× `search2` with `rows: 0`, cached 24 h), or none for `sort_options` / `keyword_syntax` | Every recovery hint for an unknown code routes here |
+| `grantsgov_list_reference` | The reference snapshot (2× `search2` with `rows: 0`, cached 24 h), or none for `sort_options` / `keyword_syntax` | Filters the full scope before paging (default 50, cap 100), with complete continuation arguments. Every recovery hint for an unknown code routes here |
 
-No resources, no prompts, no DataCanvas — every record is reachable through `grantsgov_get_opportunity` (see the decisions log).
+The `grantsgov-guide` skill is served as `skill://grantsgov-guide/SKILL.md` through `createApp({ skills: 'skills' })`. No record resources, prompts, or DataCanvas — every opportunity record is reachable through `grantsgov_get_opportunity` (see the decisions log).
 
 ### Service
 
 `GrantsGovService` (`src/services/grants-gov/grants-gov-service.ts`) is the only upstream boundary: `search`, `fetchOpportunity`, `resolveNumber`, `scanClosingWindow`, `getReference`, `dispose`. Init in `createApp({ setup })`, dispose in `teardown` (it owns the pacer's timer).
 
 - **Transport:** plain `fetch` with a per-endpoint status accept-list (`search2` {200}; `fetchOpportunity` {200, 404}). A non-accepted status is never parsed as data: 403 → `upstream_route_unavailable` (non-retryable — the legacy route is gone), 5xx → `upstream_unavailable`, 429 → `rate_limited`. A 200 with HTML, bad JSON, `errorcode !== 0`, or a "not available" message is `upstream_unavailable`.
-- **Resilience:** `withRetry` (2 retries, 25 s deadline) outside, the process-wide pacer (`maxConcurrent: 4`) inside, so each attempt re-queues. Per-attempt timeout 15 s.
+- **Resilience:** `withRetry` (2 retries, 25 s deadline) outside, the process-wide pacer (`maxConcurrent: 4`) inside, so each attempt re-queues. Per-attempt timeout 15 s; closing-window pages share one 25 s scan deadline.
 - **Reason propagation:** every service throw carries `data.reason` and no recovery hint; the framework fills the calling tool's declared hint for that reason. Each tool declares `upstream_unavailable`, `rate_limited`, and `upstream_route_unavailable` with `thrownBy: 'service'`, each with its own tool-named recovery text.
-- **Reference snapshot:** process-local (public vocabulary, not tenant data — never `ctx.state`), 24 h TTL, one in-flight build shared by concurrent callers. A failed refresh serves the stale snapshot and blocks retries for 60 s; a failure with no snapshot reaches every waiting caller, and each tool's contract fills its own recovery hint.
+- **Reference snapshot:** process-local public vocabulary, 24 h TTL, one detached build shared by concurrent callers. An operational refresh failure serves the stale snapshot with `reference_cache` provenance on both response surfaces, retaining its timestamp and blocking retries for 60 s. Healthy refresh clears degradation. Each waiter cancels independently; cold failures retain each caller's tool recovery hint.
 - **`Search2Body` is a closed interface.** Grants.gov ignores unknown keys and silently widens to the default scope, so no caller input is ever spread into a body. A new filter means a new typed key, probed first.
 
 ### Upstream traps the tools close
@@ -70,7 +70,7 @@ Each returns HTTP 200 with a plausible count, so the tool boundary maps the inpu
 | Lowercase codes, single-digit eligibility | Match nothing | Schema normalization (uppercase, zero-pad) |
 | `oppNum` | Query-parsed (`*` wildcards, spaces split), case-sensitive, returns non-equal hits | `quoteOppNum` always quotes; `isSameOpportunityNumber` post-filters; one uppercase retry on a lowercase miss |
 | `dateRange` with `closed`/`archived` | Drops the status filter | `filter_conflict` |
-| No close-date filter exists | — | `scanClosingWindow` over `closeDate\|asc` posted pages, cut by `cutClosingWindow`, 2,000-row ceiling |
+| No close-date filter exists | — | `scanClosingWindow` over `closeDate\|asc` posted pages, cut by `cutClosingWindow`, 2,000-row ceiling; incomplete scans report lower-bound counts and stay truncated even on empty pages |
 | Relevance sort | Every literal `sortBy` value returns 0 | Sent by omitting `sortBy` |
 
 ### Keyword grammar
@@ -93,7 +93,7 @@ Each returns HTTP 200 with a plausible count, so the tool boundary maps the inpu
 
 Literal identifier slots use `codeSpan()` or `tableCodeSpan()` from `render.ts`, which choose a backtick fence and preserve literal characters. Never HTML-escape inside Markdown code spans. The table variant adds only the pipe escape consumed by GFM; existing backslashes stay literal.
 
-Agency-authored text (titles, descriptions, eligibility narratives, contact blocks, file names, labels) is data. `decodeEntities()` decodes at most two layers of HTML5 references in human-readable fields; identifiers and standalone URLs stay intact. `html-to-text.ts` then converts recognized narrative markup in a forward scan, preserving source newlines, comparisons, and non-HTML angle text. `structuredContent` carries the normalized text. In `format()`, use the HTML-escaping `render.ts` helpers: `inline()` for text inside a line, `tableCell()` inside a table cell, `blockquote()` for multi-line fields. They split on every line break a renderer may honor (CR, LF, and the Unicode breaks U+000B, U+000C, U+0085, U+2028, U+2029), not just `\n`. Never interpolate raw upstream text into `content[]`, including ids and codes the upstream sends as strings. Keep text processing bounded: no repeated stripping or decoding to stability, and no scan that revisits the remaining input for every opener.
+Agency-authored text (titles, descriptions, eligibility narratives, contact blocks, file names, labels) is data. `decodeEntities()` decodes at most two layers of HTML5 references in human-readable fields; identifiers and standalone URLs stay intact. `html-to-text.ts` converts narrative markup in a forward scan, preserving source newlines, comparisons, non-HTML angle text, and table cell/row boundaries. `structuredContent` carries the normalized text. In `format()`, use `inline()`, `tableCell()`, and `blockquote()` from `render.ts`: each encodes prose once with the framework's `escapeMarkdownInline` so punctuation renders literally. They split on every line break a renderer may honor (CR, LF, U+000B, U+000C, U+0085, U+2028, U+2029), not just `\n`. Never interpolate raw upstream text into `content[]`, including ids and codes the upstream sends as strings. Keep text processing bounded: no repeated stripping or decoding to stability, and no scan that revisits the remaining input for every opener.
 
 ---
 
@@ -132,7 +132,7 @@ export const grantsgovListReference = tool('grantsgov_list_reference', {
   }),
   output: z.object({ /* topic, entries[], snapshot_date */ }),
   enrichment: {
-    totalCount: z.number().describe('Entries returned.'),
+    totalCount: z.number().describe('Total entries matching the filters before paging.'),
     notice: z.string().optional().describe('Guidance when name_contains matched nothing, …'),
   },
 
@@ -253,7 +253,9 @@ docs/design.md                                # Probed API behavior, budgets, de
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Development skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it.
+
+Root `skills/` is author-managed guidance for agents that install this server. Author it with `add-skill` when a workflow earns its place; maintenance never creates or copies it. Published skills ship in npm, Docker, and MCPB, and reach MCP clients through `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree.
 
 **Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
@@ -267,6 +269,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author a skill the server publishes in root `skills/` for the agents that use it — when one earns its place, structure, validation, delivery |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -318,7 +321,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run list-skills` | Print the skill registry |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, plugin manifest identity, README version badge (run by devcheck) |
+| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, `.mcpbignore` coverage, plugin manifests, README version badge, and published `skills/` (run by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
@@ -333,7 +336,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces `dist/grantsgov-mcp-server.mcpb` for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. MCPB is stdio-only — HTTP and Docker deployments are unaffected. The `release-and-publish` skill attaches the bundle to the GitHub Release at a stable `releases/latest/download/grantsgov-mcp-server.mcpb` URL that powers the README install badge.
+`bun run bundle` produces `dist/grantsgov-mcp-server.mcpb` for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, so every root development path needs a root-anchored exclusion; root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips dependency-shipped agent docs, platform-specific native bindings, node-gyp build output that records the packing machine's paths (compiled `*.node` addons stay), and build-only framework and better-sqlite3 files. MCPB is stdio-only — HTTP and Docker deployments are unaffected. The `release-and-publish` skill attaches the bundle to the GitHub Release at a stable `releases/latest/download/grantsgov-mcp-server.mcpb` URL that powers the README install badge.
 
 `manifest.json` declares no `user_config` (the server has no settings). `lint:packaging` (run by `devcheck`) keeps it in step with `server.json` and the plugin manifests; see *Server config* above for what an env var would touch.
 

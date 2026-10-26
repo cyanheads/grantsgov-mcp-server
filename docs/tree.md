@@ -1,6 +1,6 @@
 # grantsgov-mcp-server - Directory Structure
 
-Generated on: 2026-10-18 19:26:30
+Generated on: 2026-10-26 17:54:17
 
 ```text
 grantsgov-mcp-server/
@@ -36,6 +36,8 @@ grantsgov-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -133,6 +135,9 @@ grantsgov-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── grantsgov-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── mcp-server/
 │   │   └── tools/
@@ -157,7 +162,8 @@ grantsgov-mcp-server/
 │   │   ├── grants-gov-detail-pages.json
 │   │   ├── grants-gov-records.ts
 │   │   ├── grants-gov.ts
-│   │   └── harness.ts
+│   │   ├── harness.ts
+│   │   └── markdown.ts
 │   ├── fuzz/
 │   │   └── tools.fuzz.test.ts
 │   ├── mcp-server/
@@ -168,6 +174,8 @@ grantsgov-mcp-server/
 │   │       │   └── grantsgov-search-opportunities.tool.test.ts
 │   │       ├── input-schemas.test.ts
 │   │       └── render.test.ts
+│   ├── scripts/
+│   │   └── agent-doc-entries.test.ts
 │   ├── services/
 │   │   └── grants-gov/
 │   │       ├── grants-gov-service.test.ts
@@ -192,7 +200,9 @@ grantsgov-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

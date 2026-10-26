@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/grantsgov-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/grantsgov-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/grantsgov-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/grantsgov-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/grantsgov-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/grantsgov-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -39,6 +39,8 @@ US federal funding opportunities from Grants.gov, covering every agency's foreca
 | `grantsgov_get_opportunity` | Read full records for up to 5 opportunities by numeric id or opportunity number |
 | `grantsgov_list_reference` | List the codes the search filters take (agencies, applicant types, funding categories and instruments), plus statuses, sort options, and keyword syntax |
 
+The [grantsgov-guide skill](./skills/grantsgov-guide/SKILL.md) covers funding shortlists, eligibility and deadline review, and application requirements. It ships with the package and plugins and is available over MCP as `skill://grantsgov-guide/SKILL.md`.
+
 ## Capability reference
 
 ### `grantsgov_search_opportunities` <sub>tool</sub>
@@ -46,7 +48,7 @@ US federal funding opportunities from Grants.gov, covering every agency's foreca
 - Filters: `keyword`, `statuses` (default `forecasted` and `posted`), `agencies` (a code includes its sub-agencies), `eligibilities`, `funding_categories`, `funding_instruments`, `assistance_listing` (one ALN), `opportunity_number` (exact match), `posted_within_days`, `closing_within_days`
 - `eligibilities` also matches opportunities open to any applicant type (code `99`) unless `include_unrestricted` is `false`
 - Keyword terms are all required; join alternatives with `OR`, quote phrases, exclude with `NOT` or `-term`, and use a trailing `*` for prefixes. An ungrouped AND/OR mix or a field prefix (`agency:NSF`) fails as `invalid_keyword`
-- `closing_within_days` (0–365) scans posted opportunities by close date; it allows only the `posted` status and the `close_date_asc` sort, and `posted_within_days` rejects `closed` and `archived` (`filter_conflict`)
+- `closing_within_days` (0–365) scans posted opportunities by close date; it allows only the `posted` status and the `close_date_asc` sort, and `posted_within_days` rejects `closed` and `archived` (`filter_conflict`). `total_count_kind` distinguishes exact counts from lower bounds when the scan is incomplete; `next_offset` reaches only remaining scanned matches
 - Up to 100 rows per page (default 25); `limit` accepts 1–1,000 and values above 100 are capped with a notice. Offset paging uses `next_offset`; `effective_keyword` and `applied_filters` echo what was sent. Sub-agency facets count each subtree under the current upstream query; `include_facets: false` drops the facet counts
 - Rows carry `close_date_kind` (`fixed`, `none_listed`, `placeholder`) and `days_until_close`, but no award amounts. Unknown codes fail as `unknown_agency`, `unknown_eligibility`, or `unknown_funding_category`
 
@@ -67,6 +69,8 @@ US federal funding opportunities from Grants.gov, covering every agency's foreca
 
 - `topic`: `agencies`, `eligibilities`, `funding_categories`, `funding_instruments`, `statuses`, `sort_options`, or `keyword_syntax`
 - Codes come from a live Grants.gov snapshot, cached for 24 hours and dated by `snapshot_date`, with `open_count` (forecasted and posted) and `total_count` per code (`statuses` carries `total_count` only); `sort_options` and `keyword_syntax` are static
+- Up to 100 entries per page (default 50); `limit` accepts 1–1,000 and values above 100 are capped with a notice. Filters apply before paging; `continuation` preserves the complete next-call arguments
+- A failed refresh can serve expired data with `reference_cache` disclosing stale status, the failure reason, and retry time. Searches using that vocabulary disclose the same degradation and snapshot timestamp
 - `agencies` lists the top level by default; `parent_code` lists every code under one agency, and `name_contains` matches labels and codes on any topic (for agencies, at every level)
 - `parent_code` with another topic fails as `filter_not_applicable`; an unknown code fails as `unknown_parent_code`
 
@@ -80,7 +84,7 @@ Grants.gov-specific:
 - Keyless client for the Grants.gov REST API (`search2`, `fetchOpportunity`), with retries and at most 4 concurrent upstream requests per process
 - Inputs mapped to the form Grants.gov reads as intended: bare keyword terms joined with `AND`, hyphenated tokens (`COVID-19`, `K-12`) matched as phrases, agency codes expanded to their sub-agency subtree, opportunity numbers matched literally, and filter codes checked against the live vocabulary
 - Deadlines counted from today in US Eastern Time, the zone Grants.gov publishes in; far-future stand-in close dates are flagged `placeholder` rather than reported as deadlines
-- HTML5 entities decoded in human-readable fields; narrative HTML converted to plain text. In `content[]`, agency prose is HTML-escaped, identifiers retain literal code styling, multi-line fields render as blockquotes, and inline text is flattened to one line
+- HTML5 entities decoded in human-readable fields; narrative HTML converted to plain text with table cell and row boundaries preserved. In `content[]`, agency prose renders as literal text, identifiers retain code styling, multi-line fields render as blockquotes, and inline text is flattened to one line
 
 Agent-friendly output:
 
@@ -91,111 +95,32 @@ Agent-friendly output:
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the hosted instance, no install:
 
-A public instance is available at `https://grantsgov.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "grantsgov-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://grantsgov.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http grantsgov-mcp-server https://grantsgov.caseyjhand.com/mcp
 ```
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file. No API key is needed.
-
-```json
-{
-  "mcpServers": {
-    "grantsgov-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/grantsgov-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+```sh
+claude mcp add grantsgov-mcp-server -- npx -y @cyanheads/grantsgov-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "grantsgov-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/grantsgov-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/grantsgov-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "grantsgov-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/grantsgov-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- Network access to `api.grants.gov`. No account or API key is required.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/grantsgov-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd grantsgov-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment (optional):**
-
-```sh
-cp .env.example .env
-# every variable is optional; the server has no settings of its own
-```
+No API key is required. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -218,6 +143,16 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+) and network access to `api.grants.gov`.
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/grantsgov-mcp-server.git
+  cd grantsgov-mcp-server && bun install
+  cp .env.example .env   # optional framework overrides
+  ```
+
 - **Build and run the production version**:
 
   ```sh
@@ -239,21 +174,21 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 ### Docker
 
 ```sh
-docker build -t grantsgov-mcp-server .
-docker run --rm -p 3010:3010 grantsgov-mcp-server
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/grantsgov-mcp-server:latest
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/grantsgov-mcp-server`. OpenTelemetry peer dependencies are installed by default; build with `--build-arg OTEL_ENABLED=false` to omit them.
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/grantsgov-mcp-server`. To run over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/grantsgov-mcp-server:latest"]`. To build locally, `docker build -t grantsgov-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 
 | Directory | Purpose |
 |:---|:---|
-| `src/index.ts` | `createApp()` entry point: registers the tools and starts and disposes the Grants.gov service. |
+| `src/index.ts` | `createApp()` entry point: registers the tools and published skill, and starts and disposes the Grants.gov service. |
 | `src/mcp-server/tools/definitions` | Tool definitions (`*.tool.ts`). |
 | `src/mcp-server/tools` | Shared input schemas (`input-schemas.ts`) and `format()` rendering helpers (`render.ts`). |
 | `src/services/grants-gov` | Grants.gov API client, keyword compiler, reference snapshot, date and money normalization, HTML-to-text. |
 | `tests/` | Unit and tool tests mirroring `src/`, with trimmed Grants.gov response fixtures. |
+| `skills/` | Published guidance for agents reviewing federal funding opportunities. |
 | `docs/design.md` | Design notes: probed API behavior and the decisions behind the tool surface. |
 
 ## Development guide
