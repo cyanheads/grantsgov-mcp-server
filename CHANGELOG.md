@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-11-25
+
+grantsgov_search_opportunities gains include_narrative_eligibility for opportunities whose eligible applicant types sit in the narrative (code 25), the include_unrestricted hint and description are corrected, and mcp-ts-core ^0.13.22 lets an installed server start from its project root.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-26
 
 Grant review guidance and complete reference paging.
