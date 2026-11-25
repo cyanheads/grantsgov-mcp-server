@@ -2,8 +2,8 @@
 
 **Server:** grantsgov-mcp-server (npm `@cyanheads/grantsgov-mcp-server`)
 **Version:** 0.2.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **Upstream:** Grants.gov legacy REST API (`https://api.grants.gov/v1/api`: `POST search2`, `POST fetchOpportunity`) — keyless, no env config
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -336,7 +336,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces `dist/grantsgov-mcp-server.mcpb` for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, so every root development path needs a root-anchored exclusion; root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips dependency-shipped agent docs, platform-specific native bindings, node-gyp build output that records the packing machine's paths (compiled `*.node` addons stay), and build-only framework and better-sqlite3 files. MCPB is stdio-only — HTTP and Docker deployments are unaffected. The `release-and-publish` skill attaches the bundle to the GitHub Release at a stable `releases/latest/download/grantsgov-mcp-server.mcpb` URL that powers the README install badge.
+`bun run bundle` produces `dist/grantsgov-mcp-server.mcpb` for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, so every root development path needs a root-anchored exclusion; root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips dependency-shipped agent docs (at a package's root, plus `SKILL.md` anywhere; a `skills/` deeper in a package is runtime code and stays), platform-specific native bindings, node-gyp build output that records the packing machine's paths (compiled `*.node` addons stay), and build-only framework and better-sqlite3 files. MCPB is stdio-only — HTTP and Docker deployments are unaffected. The `release-and-publish` skill attaches the bundle to the GitHub Release at a stable `releases/latest/download/grantsgov-mcp-server.mcpb` URL that powers the README install badge.
 
 `manifest.json` declares no `user_config` (the server has no settings). `lint:packaging` (run by `devcheck`) keeps it in step with `server.json` and the plugin manifests; see *Server config* above for what an env var would touch.
 
