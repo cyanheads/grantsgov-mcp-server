@@ -29,6 +29,17 @@ describe('definition smoke test', () => {
         expect(JSON.stringify(property)).not.toContain('maxItems');
       }
     }
+    for (const [definition, fallback] of [
+      [grantsgovSearchOpportunities, 25],
+      [grantsgovListReference, 50],
+    ] as const) {
+      expect(z.toJSONSchema(definition.input, { io: 'input' }).properties?.limit).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: 1000,
+        default: fallback,
+      });
+    }
     expect(grantsgovSearchOpportunities.input.parse({ limit: 1000 }).limit).toBe(1000);
     expect(grantsgovSearchOpportunities.input.safeParse({ limit: 1001 }).success).toBe(false);
   });

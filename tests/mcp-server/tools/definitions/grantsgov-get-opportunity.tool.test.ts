@@ -1377,6 +1377,7 @@ describe('error contract', () => {
         hint: 'Grants.gov is not responding; wait a minute and call grantsgov_get_opportunity again.',
       },
     });
+    for (const key of ['body', 'responseBody']) expect(error.data).not.toHaveProperty(key);
   });
 
   it('throws rate_limited with this tool’s recovery hint on a 429 past the retry budget', async () => {
@@ -1395,6 +1396,7 @@ describe('error contract', () => {
         hint: 'Grants.gov is rate limiting requests; wait the retryAfter interval (or a minute) and call grantsgov_get_opportunity again.',
       },
     });
+    for (const key of ['body', 'responseBody']) expect(error.data).not.toHaveProperty(key);
   });
 
   it('declares exactly the reasons exercised above', () => {

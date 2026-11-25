@@ -454,13 +454,27 @@ describe('reference paging', () => {
       cap: 50,
       continuation: { topic: 'agencies', limit: 50, offset: 50 },
     });
-    const capped = await runToolContract(tool, { topic: 'agencies', limit: 1000 });
-    expect(capped.structuredContent).toMatchObject({
-      totalCount: 125,
-      shown: 100,
-      cap: 100,
-      notice: expect.stringContaining('100'),
-      continuation: { topic: 'agencies', limit: 100, offset: 100 },
+    for (const limit of [101, 1000]) {
+      const capped = await runToolContract(tool, { topic: 'agencies', limit });
+      const clamp = `Requested limit ${limit} was clamped to the processing cap of 100.`;
+      expect(capped.isError).not.toBe(true);
+      expect(capped.structuredContent).toMatchObject({
+        totalCount: 125,
+        shown: 100,
+        cap: 100,
+        notice: expect.stringContaining(clamp),
+        continuation: { topic: 'agencies', limit: 100, offset: 100 },
+      });
+      const text = capped.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      expect(text).toContain(clamp);
+    }
+    const over = await runToolContract(tool, { topic: 'agencies', limit: 1001 });
+    expect(over.isError).toBe(true);
+    expect(over.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
     });
   });
 });
@@ -520,6 +534,7 @@ describe('error contract', () => {
         hint: 'Grants.gov is not responding; wait a minute and call grantsgov_list_reference again.',
       },
     });
+    for (const key of ['body', 'responseBody']) expect(error.data).not.toHaveProperty(key);
   });
 
   it('gives each concurrent caller of a failed shared snapshot build its own tool’s hint', async () => {
