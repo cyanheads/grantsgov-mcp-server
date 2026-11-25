@@ -150,6 +150,13 @@ const Effective = tool.output.extend(tool.enrichment);
 const FACET_FRAGMENT =
   'Facet counts describe every posted opportunity matching the other filters, not only those closing in the window.';
 const RERUN = 'Rerun with fewer filters to see facet counts for refining.';
+const NO_MATCH = 'No opportunities matched these filters.';
+const UNRESTRICTED_FRAGMENT =
+  'Set include_unrestricted to true to add opportunities open to any applicant type.';
+const NARRATIVE_FRAGMENT =
+  'Set include_narrative_eligibility to true to add opportunities coded 25, whose eligible applicant types are given in the eligibility narrative.';
+const ELIGIBILITY_CODES_FRAGMENT =
+  'Remove one filter at a time, or confirm the eligibilities codes with grantsgov_list_reference.';
 const ALN_FRAGMENT = (aln: string) =>
   `assistance_listing is one exact ALN (${aln}); confirm the number (each grantsgov_get_opportunity record lists its assistance_listings), or drop assistance_listing and search the program name as keyword.`;
 
@@ -487,11 +494,157 @@ describe('include_unrestricted', () => {
     expect((await pageBodies())[0]?.eligibilities).toBe('99|12');
   });
 
+  it('still sends a caller-listed 99 when false', async () => {
+    page(POSTED_HITS);
+    const { enrichment } = await run({ eligibilities: ['99', '12'], include_unrestricted: false });
+    expect((await pageBodies())[0]?.eligibilities).toBe('99|12');
+    expect(enrichment.applied_filters).toEqual({
+      statuses: ['forecasted', 'posted'],
+      statuses_defaulted: true,
+      eligibilities_sent: '99|12',
+      include_unrestricted: false,
+      sort: 'open_date_desc',
+    });
+  });
+
   it('does nothing without eligibilities', async () => {
     page(POSTED_HITS);
     await run({ include_unrestricted: true });
     expect((await pageBodies())[0]).not.toHaveProperty('eligibilities');
     expect(await snapshotCalls()).toBe(0);
+  });
+});
+
+describe('include_narrative_eligibility', () => {
+  /** 17 nonblank entries, the list cap, in every accepted spelling; three distinct codes. */
+  const AT_CAP = Array.from({ length: 17 }, (_, i) => ['7', '12', 99][i % 3] as string | number);
+
+  it.each([
+    ['the listed code plus 99 by default', { eligibilities: ['07'] }, '07|99'],
+    [
+      '25 after the added 99 when set',
+      { eligibilities: ['07'], include_narrative_eligibility: true },
+      '07|99|25',
+    ],
+    [
+      '25 without 99 when include_unrestricted is false',
+      { eligibilities: ['07'], include_unrestricted: false, include_narrative_eligibility: true },
+      '07|25',
+    ],
+    [
+      'a caller-listed 25 once, in place, with 99 appended',
+      { eligibilities: ['25', '07'], include_narrative_eligibility: true },
+      '25|07|99',
+    ],
+    [
+      'caller-listed 25 and 99 when both toggles are off',
+      { eligibilities: ['25', '99', '07'], include_unrestricted: false },
+      '25|99|07',
+    ],
+    [
+      'each code once from a list at the 17-entry cap, 25 appended after the listed 99',
+      { eligibilities: AT_CAP, include_narrative_eligibility: true },
+      '07|12|99|25',
+    ],
+  ])('sends %s', async (_label, input, sent) => {
+    page([]);
+    const { enrichment } = await run(input);
+    expect((await pageBodies()).map((body) => body.eligibilities)).toEqual([sent]);
+    expect(enrichment.applied_filters).toMatchObject({ eligibilities_sent: sent });
+  });
+
+  it('keeps the default applied_filters shape when explicitly false', async () => {
+    page(POSTED_HITS);
+    const { enrichment } = await run({
+      eligibilities: ['07'],
+      include_narrative_eligibility: false,
+    });
+    expect(await pageBodies()).toEqual([{ ...DEFAULT_BODY, eligibilities: '07|99' }]);
+    expect(enrichment.applied_filters).toEqual({
+      statuses: ['forecasted', 'posted'],
+      statuses_defaulted: true,
+      eligibilities_sent: '07|99',
+      include_unrestricted: true,
+      sort: 'open_date_desc',
+    });
+  });
+
+  it('echoes the setting in applied_filters when set', async () => {
+    page(POSTED_HITS);
+    const { enrichment } = await run({
+      eligibilities: ['07'],
+      include_unrestricted: false,
+      include_narrative_eligibility: true,
+    });
+    expect(enrichment.applied_filters).toEqual({
+      statuses: ['forecasted', 'posted'],
+      statuses_defaulted: true,
+      eligibilities_sent: '07|25',
+      include_unrestricted: false,
+      include_narrative_eligibility: true,
+      sort: 'open_date_desc',
+    });
+  });
+
+  it('acts only with eligibilities: no eligibilities key and no snapshot, the setting still echoed', async () => {
+    page(POSTED_HITS);
+    const { enrichment } = await run({ include_narrative_eligibility: true });
+    expect(await pageBodies()).toEqual([DEFAULT_BODY]);
+    expect(await snapshotCalls()).toBe(0);
+    expect(enrichment.applied_filters).toEqual({
+      statuses: ['forecasted', 'posted'],
+      statuses_defaulted: true,
+      include_unrestricted: true,
+      include_narrative_eligibility: true,
+      sort: 'open_date_desc',
+    });
+  });
+
+  it('sends the widened codes on every page of a closing-window scan', async () => {
+    paged(Array.from({ length: 600 }, (_, i) => postedHit(i + 1, 2)));
+    const { enrichment } = await run({
+      closing_within_days: 5,
+      eligibilities: ['07'],
+      include_narrative_eligibility: true,
+      include_facets: false,
+    });
+    expect((await pageBodies()).map((body) => [body.startRecordNum, body.eligibilities])).toEqual([
+      [0, '07|99|25'],
+      [500, '07|99|25'],
+    ]);
+    expect(enrichment).toMatchObject({
+      totalCount: 600,
+      total_count_kind: 'exact',
+      applied_filters: { eligibilities_sent: '07|99|25', include_narrative_eligibility: true },
+    });
+  });
+
+  it('sends the widened codes on both opportunity-number lookups', async () => {
+    serve(({ oppNum }) => ok(searchData(oppNum === '"HRSA-27-005"' ? [HRSA_HIT] : [])));
+    const { result } = await run({
+      opportunity_number: 'hrsa-27-005',
+      eligibilities: ['07'],
+      include_unrestricted: false,
+      include_narrative_eligibility: true,
+    });
+    expect((await pageBodies()).map((body) => [body.oppNum, body.eligibilities])).toEqual([
+      ['"hrsa-27-005"', '07|25'],
+      ['"HRSA-27-005"', '07|25'],
+    ]);
+    expect(ids(result)).toEqual(['363423']);
+  });
+
+  it('validates the listed codes first: an unknown code fails with no search sent', async () => {
+    serve(() => ok(searchData([])));
+    const error = await failure({ eligibilities: ['42'], include_narrative_eligibility: true });
+    expect(error.data).toMatchObject({
+      reason: 'unknown_eligibility',
+      eligibility: '42',
+      recovery: {
+        hint: 'Call grantsgov_list_reference with topic eligibilities for the valid two-digit applicant-type codes.',
+      },
+    });
+    expect(await pageBodies()).toEqual([]);
   });
 });
 
@@ -662,23 +815,45 @@ describe('facets', () => {
       .join('\n');
     expect(text).toMatch(/`HHS-CDC` [^;\n]* \(3\)(?:;|$)/m);
   });
-  it('bounded search limit clamps the real page and composes pagination notice', async () => {
-    page(
-      Array.from({ length: 130 }, (_, i) => ({ ...HRSA_HIT, id: String(i + 1) })),
-      201,
-    );
-    const envelope = await runToolContract(tool, { limit: 101, include_facets: false });
-    expect(envelope.isError).not.toBe(true);
+  it('rejects limit 1001 before any upstream call with invalid_arguments', async () => {
+    page([]);
+    const envelope = await runToolContract(tool, { limit: 1001, include_facets: false });
+    expect(envelope.isError).toBe(true);
     expect(envelope.structuredContent).toMatchObject({
-      cap: 100,
-      shown: 100,
-      next_offset: 100,
-      truncated: true,
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
     });
-    expect((envelope.structuredContent as Output).opportunities).toHaveLength(100);
-    expect((envelope.structuredContent as EnvelopeOutput).notice).toContain('100');
-    expect((envelope.structuredContent as EnvelopeOutput).notice).toContain('offset 100');
+    expect(await pageBodies()).toEqual([]);
   });
+  it.each([101, 1000])(
+    'clamps limit %i to the 100-row cap, composing the clamp and pagination notices on both surfaces',
+    async (limit) => {
+      page(
+        Array.from({ length: 130 }, (_, i) => ({ ...HRSA_HIT, id: String(i + 1) })),
+        201,
+      );
+      const envelope = await runToolContract(tool, { limit, include_facets: false });
+      expect(envelope.isError).not.toBe(true);
+      expect(await pageBodies()).toEqual([
+        expect.objectContaining({ rows: 100, startRecordNum: 0 }),
+      ]);
+      expect(envelope.structuredContent).toMatchObject({
+        cap: 100,
+        shown: 100,
+        next_offset: 100,
+        truncated: true,
+      });
+      expect((envelope.structuredContent as Output).opportunities).toHaveLength(100);
+      const clamp = `Requested limit ${limit} was capped at 100 rows per page.`;
+      const { notice } = envelope.structuredContent as EnvelopeOutput;
+      expect(notice).toContain(clamp);
+      expect(notice).toContain('offset 100');
+      const text = envelope.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      expect(text).toContain(clamp);
+    },
+  );
   it('maps every facet group, trimming labels, with no sub_agencies unless agencies is set', async () => {
     page(CDC_FORECAST_HITS, 58, CDC_FACETS);
     const { result } = await run({});
@@ -744,10 +919,11 @@ describe('zero-hit notice composition', () => {
     expect(enrichment).toMatchObject({ totalCount: 0, truncated: false, shown: 0, cap: 25 });
     expect(enrichment.notice).toBe(
       [
-        'No opportunities matched these filters.',
+        NO_MATCH,
         '236 closed and 972 archived opportunities match; add "closed" and/or "archived" to statuses to include them.',
         'All keyword terms were required (tuberculosis AND tribal); join alternatives with OR, in parentheses when other terms stay required, or drop a term.',
-        'Set include_unrestricted to true to add opportunities open to any applicant type.',
+        UNRESTRICTED_FRAGMENT,
+        NARRATIVE_FRAGMENT,
         'Raise posted_within_days or remove it; it limits results to opportunities posted in the last 7 days.',
         'Remove one filter at a time, or confirm the eligibilities and funding_instruments codes with grantsgov_list_reference.',
         RERUN,
@@ -755,18 +931,89 @@ describe('zero-hit notice composition', () => {
     );
   });
 
+  it.each([
+    [
+      '99 sent, 25 not: the narrative fragment',
+      { eligibilities: ['07'] },
+      '07|99',
+      [NARRATIVE_FRAGMENT],
+    ],
+    [
+      '99 and 25 sent: neither eligibility fragment',
+      { eligibilities: ['07'], include_narrative_eligibility: true },
+      '07|99|25',
+      [],
+    ],
+    [
+      '25 sent, 99 not: the include_unrestricted fragment',
+      { eligibilities: ['07'], include_unrestricted: false, include_narrative_eligibility: true },
+      '07|25',
+      [UNRESTRICTED_FRAGMENT],
+    ],
+    [
+      'neither sent: both, include_unrestricted first',
+      { eligibilities: ['07'], include_unrestricted: false },
+      '07',
+      [UNRESTRICTED_FRAGMENT, NARRATIVE_FRAGMENT],
+    ],
+    [
+      'a caller-listed 99 with include_unrestricted false: the narrative fragment only',
+      { eligibilities: ['99', '07'], include_unrestricted: false },
+      '99|07',
+      [NARRATIVE_FRAGMENT],
+    ],
+    [
+      'a caller-listed 25 with the default toggles: neither eligibility fragment',
+      { eligibilities: ['25', '07'] },
+      '25|07|99',
+      [],
+    ],
+    [
+      'caller-listed 99 and 25 with include_unrestricted false: neither eligibility fragment',
+      { eligibilities: ['99', '25', '07'], include_unrestricted: false },
+      '99|25|07',
+      [],
+    ],
+  ])('composes the eligibility fragments for %s', async (_label, input, sent, fragments) => {
+    page([], 0, {});
+    const { enrichment } = await run(input);
+    expect((await pageBodies())[0]?.eligibilities).toBe(sent);
+    expect(enrichment.notice).toBe(
+      [NO_MATCH, ...fragments, ELIGIBILITY_CODES_FRAGMENT, RERUN].join(' '),
+    );
+  });
+
+  it('adds no eligibility fragment when include_narrative_eligibility is set without eligibilities', async () => {
+    page([], 0, {});
+    const { enrichment } = await run({
+      keyword: 'tuberculosis',
+      include_narrative_eligibility: true,
+    });
+    expect((await pageBodies())[0]).not.toHaveProperty('eligibilities');
+    expect(enrichment.notice).toBe(`${NO_MATCH} ${RERUN}`);
+  });
+
+  it('adds no eligibility fragment past the end of a non-empty result', async () => {
+    page([], 5);
+    const { enrichment } = await run({ eligibilities: ['07'], offset: 50 });
+    expect(await pageBodies()).toEqual([
+      { ...DEFAULT_BODY, eligibilities: '07|99', startRecordNum: 50 },
+    ]);
+    expect(enrichment.notice).toBe(
+      'Offset 50 is past the end of 5 results. Call again with offset 0, or a multiple of limit below 5.',
+    );
+  });
+
   it('leaves out the status fragment when statuses was given explicitly', async () => {
     page([], 0, NSF_ZERO_HIT_FACETS);
     const { enrichment } = await run({ statuses: ['forecasted'], keyword: 'tuberculosis' });
-    expect(enrichment.notice).toBe(`No opportunities matched these filters. ${RERUN}`);
+    expect(enrichment.notice).toBe(`${NO_MATCH} ${RERUN}`);
   });
 
   it('leaves out the status fragment when no closed or archived opportunity matches', async () => {
     page([], 0, {});
     const { enrichment } = await run({ assistance_listing: '93.ECH' });
-    expect(enrichment.notice).toBe(
-      `No opportunities matched these filters. ${ALN_FRAGMENT('93.ECH')} ${RERUN}`,
-    );
+    expect(enrichment.notice).toBe(`${NO_MATCH} ${ALN_FRAGMENT('93.ECH')} ${RERUN}`);
     expect((await pageBodies())[0]?.cfda).toBe('93.ECH');
   });
 
@@ -786,7 +1033,7 @@ describe('zero-hit notice composition', () => {
     });
     expect(enrichment.notice).toBe(
       [
-        'No opportunities matched these filters.',
+        NO_MATCH,
         ALN_FRAGMENT('93.866'),
         'Remove one filter at a time, or confirm the agencies and funding_categories codes with grantsgov_list_reference.',
         RERUN,
@@ -798,7 +1045,7 @@ describe('zero-hit notice composition', () => {
     page([], 0, NSF_ZERO_HIT_FACETS);
     const { enrichment } = await run({ opportunity_number: 'HRSA-99-999' });
     expect(enrichment.notice).toBe(
-      `No opportunities matched these filters. opportunity_number is exact-match; call grantsgov_get_opportunity with opportunity_numbers to search every status, or put the number in quotes in keyword for a full-text match. ${RERUN}`,
+      `${NO_MATCH} opportunity_number is exact-match; call grantsgov_get_opportunity with opportunity_numbers to search every status, or put the number in quotes in keyword for a full-text match. ${RERUN}`,
     );
     expect(await pageBodies()).toHaveLength(1);
   });
@@ -1254,6 +1501,7 @@ describe('error contract', () => {
           hint: 'Grants.gov is not responding; wait a minute and call grantsgov_search_opportunities again.',
         },
       });
+      for (const key of ['body', 'responseBody']) expect(error.data).not.toHaveProperty(key);
       expect(await pageBodies()).toHaveLength(3);
     },
   );
@@ -1270,6 +1518,7 @@ describe('error contract', () => {
         hint: 'Grants.gov is rate limiting requests; wait the retryAfter interval (or a minute) and call grantsgov_search_opportunities again.',
       },
     });
+    for (const key of ['body', 'responseBody']) expect(error.data).not.toHaveProperty(key);
     expect(await pageBodies()).toHaveLength(1);
   });
 
@@ -1304,8 +1553,21 @@ describe('input schema', () => {
     ['limit over 1000', { limit: 1001 }],
     ['a keyword over 500 characters', { keyword: 'x'.repeat(501) }],
     ['more than 10 agencies', { agencies: Array.from({ length: 11 }, () => 'NSF') }],
+    ['more than 17 eligibilities', { eligibilities: Array.from({ length: 18 }, () => '07') }],
   ])('rejects %s', (_label, input) => {
     expect(() => tool.input.parse(input)).toThrow();
+  });
+
+  it('parses include_narrative_eligibility as a boolean defaulting to false, rejecting a string', () => {
+    expect(tool.input.parse({}).include_narrative_eligibility).toBe(false);
+    expect(
+      tool.input.parse({ include_narrative_eligibility: true }).include_narrative_eligibility,
+    ).toBe(true);
+    const parsed = tool.input.safeParse({ include_narrative_eligibility: 'true' });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues).toMatchObject([
+      { code: 'invalid_type', path: ['include_narrative_eligibility'] },
+    ]);
   });
 });
 
@@ -1497,6 +1759,79 @@ describe('production envelope (runToolContract)', () => {
     });
     expect(text(result)).toContain('No opportunities on this page.');
     expect(text(result)).toContain('**Applied filters:**');
+  });
+
+  const appliedLine = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    text(result)
+      .split('\n')
+      .find((line) => line.startsWith('**Applied filters:**'));
+
+  it('renders the default eligibility echo unchanged on both surfaces', async () => {
+    page(POSTED_HITS);
+    const result = await runToolContract(tool, { eligibilities: ['07'], include_facets: false });
+    expect(result.isError).toBeFalsy();
+    expect(await pageBodies()).toEqual([{ ...DEFAULT_BODY, eligibilities: '07|99' }]);
+    expect(result.structuredContent).toHaveProperty('applied_filters', {
+      statuses: ['forecasted', 'posted'],
+      statuses_defaulted: true,
+      eligibilities_sent: '07|99',
+      include_unrestricted: true,
+      sort: 'open_date_desc',
+    });
+    expect(appliedLine(result)).toBe(
+      '**Applied filters:** statuses forecasted, posted (default); eligibilities sent `07|99`; include_unrestricted true; sort open_date_desc',
+    );
+  });
+
+  it('echoes include_narrative_eligibility on both surfaces when set', async () => {
+    page(POSTED_HITS);
+    const result = await runToolContract(tool, {
+      eligibilities: ['07'],
+      include_narrative_eligibility: true,
+      include_facets: false,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(await pageBodies()).toEqual([{ ...DEFAULT_BODY, eligibilities: '07|99|25' }]);
+    expect(result.structuredContent).toHaveProperty('applied_filters', {
+      statuses: ['forecasted', 'posted'],
+      statuses_defaulted: true,
+      eligibilities_sent: '07|99|25',
+      include_unrestricted: true,
+      include_narrative_eligibility: true,
+      sort: 'open_date_desc',
+    });
+    expect(appliedLine(result)).toBe(
+      '**Applied filters:** statuses forecasted, posted (default); eligibilities sent `07|99|25`; include_unrestricted true; include_narrative_eligibility true; sort open_date_desc',
+    );
+  });
+
+  it('echoes include_narrative_eligibility on both surfaces when set without eligibilities', async () => {
+    page(POSTED_HITS);
+    const result = await runToolContract(tool, {
+      include_narrative_eligibility: true,
+      include_facets: false,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(await pageBodies()).toEqual([DEFAULT_BODY]);
+    expect(result.structuredContent).toHaveProperty('applied_filters', {
+      statuses: ['forecasted', 'posted'],
+      statuses_defaulted: true,
+      include_unrestricted: true,
+      include_narrative_eligibility: true,
+      sort: 'open_date_desc',
+    });
+    expect(appliedLine(result)).toBe(
+      '**Applied filters:** statuses forecasted, posted (default); include_unrestricted true; include_narrative_eligibility true; sort open_date_desc',
+    );
+  });
+
+  it('carries the narrative zero-hit fragment on both surfaces', async () => {
+    page([], 0, {});
+    const result = await runToolContract(tool, { eligibilities: ['07'], include_facets: false });
+    expect(result.isError).toBeFalsy();
+    const notice = [NO_MATCH, NARRATIVE_FRAGMENT, ELIGIBILITY_CODES_FRAGMENT, RERUN].join(' ');
+    expect(result.structuredContent).toHaveProperty('notice', notice);
+    expect(text(result)).toContain(notice);
   });
 
   it('parses an under-cap page against output + enrichment', async () => {

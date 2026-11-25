@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/grantsgov-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/grantsgov-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/grantsgov-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/grantsgov-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/grantsgov-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/grantsgov-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -46,7 +46,7 @@ The [grantsgov-guide skill](./skills/grantsgov-guide/SKILL.md) covers funding sh
 ### `grantsgov_search_opportunities` <sub>tool</sub>
 
 - Filters: `keyword`, `statuses` (default `forecasted` and `posted`), `agencies` (a code includes its sub-agencies), `eligibilities`, `funding_categories`, `funding_instruments`, `assistance_listing` (one ALN), `opportunity_number` (exact match), `posted_within_days`, `closing_within_days`
-- `eligibilities` also matches opportunities open to any applicant type (code `99`) unless `include_unrestricted` is `false`
+- `eligibilities` also matches opportunities open to any applicant type (code `99`) unless `include_unrestricted` is `false`. Opportunities coded `25` ("Others", eligible types given in the eligibility narrative) match on that code only when `25` is listed or `include_narrative_eligibility` is `true`; code `25` is the most common, so the flag widens a search substantially and each match needs its narrative read with `grantsgov_get_opportunity`
 - Keyword terms are all required; join alternatives with `OR`, quote phrases, exclude with `NOT` or `-term`, and use a trailing `*` for prefixes. An ungrouped AND/OR mix or a field prefix (`agency:NSF`) fails as `invalid_keyword`
 - `closing_within_days` (0–365) scans posted opportunities by close date; it allows only the `posted` status and the `close_date_asc` sort, and `posted_within_days` rejects `closed` and `archived` (`filter_conflict`). `total_count_kind` distinguishes exact counts from lower bounds when the scan is incomplete; `next_offset` reaches only remaining scanned matches
 - Up to 100 rows per page (default 25); `limit` accepts 1–1,000 and values above 100 are capped with a notice. Offset paging uses `next_offset`; `effective_keyword` and `applied_filters` echo what was sent. Sub-agency facets count each subtree under the current upstream query; `include_facets: false` drops the facet counts
@@ -88,7 +88,7 @@ Grants.gov-specific:
 
 Agent-friendly output:
 
-- Echo of what ran: `effective_keyword` and `applied_filters`, including defaulted statuses, the expanded agency filter, and the added code `99`
+- Echo of what ran: `effective_keyword` and `applied_filters`, including defaulted statuses, the expanded agency filter, and the added codes `99` and `25` (`include_narrative_eligibility` is echoed only when set)
 - Discriminated fields: `close_date_kind`, `doc_type`, `money_source`, and `unresolved[].outcome` let callers branch on data
 - Empty-result and paging notices that name the next call, such as counts of closed and archived matches when the default statuses found nothing, or the next close date when a closing window is empty
 - Typed failure reasons with recovery hints, including `upstream_unavailable`, `rate_limited`, and `upstream_route_unavailable` for Grants.gov outages
@@ -143,7 +143,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+) and network access to `api.grants.gov`.
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+) and network access to `api.grants.gov`.
 
 - **Clone and install:**
 

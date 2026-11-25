@@ -4,7 +4,7 @@ description: Use grantsgov_* tools to shortlist federal funding, assess applican
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -28,7 +28,7 @@ An assistance listing number (ALN, formerly CFDA) identifies a funding program, 
 
 ### Build a funding shortlist
 
-Translate the user's organization and project into applicant types and subject terms before searching. Use reference vocabulary for categorical filters rather than guessing codes. Include unrestricted opportunities when looking for everything the applicant may pursue; excluding them can hide valid candidates. An opportunity listing the applicant's type may also accept other types, so that match alone does not establish exclusive targeting.
+Translate the user's organization and project into applicant types and subject terms before searching. Use reference vocabulary for categorical filters rather than guessing codes. Include unrestricted opportunities when looking for everything the applicant may pursue; excluding them can hide valid candidates. Opportunities whose eligible applicant types appear only in the eligibility narrative (code 25, "Others") are also missed by an applicant-type search unless include_narrative_eligibility is set; each such match needs its eligibility narrative read through grantsgov_get_opportunity before it counts as a fit. An opportunity listing the applicant's type may also accept other types, so that match alone does not establish exclusive targeting.
 
 Treat an empty narrow search as evidence about that query. Review its applied filters and keyword interpretation before concluding the topic has no funding. Use grouped alternatives for synonymous terms; consult the keyword syntax reference when constructing a more complex query.
 

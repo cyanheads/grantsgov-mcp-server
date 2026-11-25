@@ -84,6 +84,8 @@ const FUNDING_INSTRUMENTS = ['G', 'CA', 'PC', 'O'] as const;
 const NUMBER_MODE_ROWS = 100;
 /** The unrestricted applicant-type code ("open to any type of entity"). */
 const UNRESTRICTED = '99';
+/** The "Others" applicant-type code: the eligibility narrative names the eligible applicant types. */
+const NARRATIVE = '25';
 
 const trimUpper = (value: unknown): unknown =>
   typeof value === 'string' ? value.trim().toUpperCase() : value;
@@ -216,11 +218,17 @@ const AppliedFilters = z
       .string()
       .optional()
       .describe(
-        'Applicant-type codes as sent upstream, pipe-joined, including 99 when include_unrestricted added it.',
+        'Applicant-type codes as sent upstream, pipe-joined, including 99 and 25 when include_unrestricted and include_narrative_eligibility added them.',
       ),
     include_unrestricted: z
       .boolean()
       .describe('The include_unrestricted setting; it acts only when eligibilities is set.'),
+    include_narrative_eligibility: z
+      .literal(true)
+      .optional()
+      .describe(
+        'Present, as true, only when include_narrative_eligibility was set; it acts only when eligibilities is set.',
+      ),
     funding_categories: z
       .array(z.string().describe('One category code.'))
       .optional()
@@ -253,6 +261,7 @@ function renderAppliedFilters(applied: Applied): string {
     applied.eligibilities_sent !== undefined &&
       `eligibilities sent ${codeSpan(applied.eligibilities_sent)}`,
     `include_unrestricted ${applied.include_unrestricted}`,
+    applied.include_narrative_eligibility && 'include_narrative_eligibility true',
     applied.funding_categories && `funding categories ${applied.funding_categories.join(', ')}`,
     applied.funding_instruments && `funding instruments ${applied.funding_instruments.join(', ')}`,
     applied.assistance_listing !== undefined && `assistance listing ${applied.assistance_listing}`,
@@ -360,13 +369,19 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       'Agency codes from grantsgov_list_reference topic agencies (e.g. HHS, HHS-NIH11, NSF). One whole string or an array, up to 10 nonblank entries. A code includes its sub-agencies. Case-insensitive. Any listed agency matches.',
     ),
     eligibilities: optionalList(ELIGIBILITY_INPUT, 17).describe(
-      'Two-digit applicant-type codes from grantsgov_list_reference topic eligibilities (e.g. 12 = nonprofits with 501(c)(3) status, 07 = federally recognized tribal governments). One whole string or an array of strings or numbers, up to 17 nonblank entries. A single digit is zero-padded (7 = 07). Any listed type matches.',
+      'Two-digit applicant-type codes from grantsgov_list_reference topic eligibilities (e.g. 12 = nonprofits with 501(c)(3) status, 07 = federally recognized tribal governments). One whole string or an array of strings or numbers, up to 17 nonblank entries. A single digit is zero-padded (7 = 07). Any listed type matches. Opportunities coded 25 ("Others"), whose eligible applicant types are given in the eligibility narrative, match on that code only when 25 is listed or include_narrative_eligibility is true.',
     ),
     include_unrestricted: z
       .boolean()
       .default(true)
       .describe(
-        'When eligibilities is set, also match opportunities open to any applicant type (code 99), which the specific codes do not cover. Set false to see only opportunities targeted at the listed types.',
+        'When eligibilities is set, also match opportunities coded 99 (open to any applicant type) that do not list a requested code. Set false to stop adding 99; a 99 listed in eligibilities is still sent.',
+      ),
+    include_narrative_eligibility: z
+      .boolean()
+      .default(false)
+      .describe(
+        'When eligibilities is set, also match opportunities coded 25 ("Others"), whose eligible applicant types are given in the eligibility narrative instead of a code. Code 25 is the most common applicant-type code, so this widens a search substantially; read each narrative with grantsgov_get_opportunity before treating a match as a fit.',
       ),
     funding_categories: optionalList(FUNDING_CATEGORY_INPUT, 28).describe(
       'Funding category codes from grantsgov_list_reference topic funding_categories (e.g. HL = Health, ED = Education). One whole string or an array, up to 28 nonblank entries. Case-insensitive. Any listed category matches.',
@@ -643,7 +658,8 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       agenciesSent = encodeAgencyFilter(agencies, snapshot);
     }
 
-    let eligibilitiesSent: string | undefined;
+    /** Applicant-type codes as sent upstream, including any 99 and 25 the toggles add. */
+    let eligibilityCodes: string[] | undefined;
     if (input.eligibilities && snapshot) {
       const known = new Set(snapshot.eligibilities.map((entry) => entry.code));
       const codes = [...new Set(input.eligibilities)];
@@ -656,8 +672,10 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
         );
       }
       if (input.include_unrestricted && !codes.includes(UNRESTRICTED)) codes.push(UNRESTRICTED);
-      eligibilitiesSent = codes.join('|');
+      if (input.include_narrative_eligibility && !codes.includes(NARRATIVE)) codes.push(NARRATIVE);
+      eligibilityCodes = codes;
     }
+    const eligibilitiesSent = eligibilityCodes?.join('|');
 
     const fundingCategories = input.funding_categories && [...new Set(input.funding_categories)];
     if (fundingCategories && snapshot) {
@@ -685,6 +703,7 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
       ...(agenciesSent !== undefined && { agencies_sent: agenciesSent }),
       ...(eligibilitiesSent !== undefined && { eligibilities_sent: eligibilitiesSent }),
       include_unrestricted: input.include_unrestricted,
+      ...(input.include_narrative_eligibility && { include_narrative_eligibility: true }),
       ...(fundingCategories && { funding_categories: fundingCategories }),
       ...(fundingInstruments && { funding_instruments: fundingInstruments }),
       ...(input.assistance_listing !== undefined && {
@@ -822,9 +841,14 @@ export const grantsgovSearchOpportunities = tool('grantsgov_search_opportunities
           `All keyword terms were required (${keyword.compiled}); join alternatives with OR, in parentheses when other terms stay required, or drop a term.`,
         );
       }
-      if (input.eligibilities !== undefined && !input.include_unrestricted) {
+      if (eligibilityCodes && !eligibilityCodes.includes(UNRESTRICTED)) {
         fragments.push(
           'Set include_unrestricted to true to add opportunities open to any applicant type.',
+        );
+      }
+      if (eligibilityCodes && !eligibilityCodes.includes(NARRATIVE)) {
+        fragments.push(
+          'Set include_narrative_eligibility to true to add opportunities coded 25, whose eligible applicant types are given in the eligibility narrative.',
         );
       }
       if (input.posted_within_days !== undefined) {
